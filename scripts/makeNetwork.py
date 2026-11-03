@@ -10,6 +10,11 @@ import os
 import time
 import subprocess
 
+try:  # run as ./scripts/makeNetwork.py
+    from imagepath import resolve_in_root
+except ImportError:  # imported as scripts.makeNetwork (tests)
+    from scripts.imagepath import resolve_in_root
+
 debug = 0
 SCRATCHDIR = ""
 SCRIPTDIR = ""
@@ -556,8 +561,14 @@ def inferNetwork(iid, arch, endianness, init):
 
     loopFile = mountImage(targetDir)
 
+    # `init` comes from the firmware; resolve it inside the image (chroot
+    # semantics) so neither `file` nor the append below can reach host files
+    # through a symlink planted in the image (SECURITY.md S5). The last
+    # component is not followed: `file -b` reports symlinks as such and those
+    # take the preInit.sh branch below, as before.
+    initPath = resolve_in_root(targetDir + "/image", init, follow_final=False)
     fileType = (
-        subprocess.check_output(["file", "-b", "%s/image/%s" % (targetDir, init)])
+        subprocess.check_output(["file", "-b", initPath])
         .decode()
         .strip()
     )
@@ -579,7 +590,7 @@ def inferNetwork(iid, arch, endianness, init):
         if (
             fileType.find("ELF") == -1 and fileType.find("symbolic link") == -1
         ):  # maybe script
-            targetFile = targetDir + "/image/" + init
+            targetFile = initPath
             targetData = readWithException(targetFile)
             out = open(targetFile, "a")
         # netgear R6200

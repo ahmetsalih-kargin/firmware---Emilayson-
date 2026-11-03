@@ -80,13 +80,25 @@ mkdir "${IMAGE_DIR}/firmadyne/"
 mkdir "${IMAGE_DIR}/firmadyne/libnvram/"
 mkdir "${IMAGE_DIR}/firmadyne/libnvram.override/"
 
-cp $(which busybox) "${IMAGE_DIR}"
-cp $(which bash-static) "${IMAGE_DIR}"
+# The image is untrusted: a symlink it contains must never redirect a write to
+# the host (SECURITY.md S5). Top-level helper files replace whatever the image
+# has under that name (it is deleted again after use, as before); other paths
+# are resolved with chroot semantics so they always stay inside the image.
+put_top () {
+    rm -f -- "${IMAGE_DIR}/${2}"
+    cp -- "${1}" "${IMAGE_DIR}/${2}"
+}
+image_path () {
+    python3 "${SCRIPT_DIR}/imagepath.py" "${IMAGE_DIR}" "${1}"
+}
+
+put_top "$(which busybox)" busybox
+put_top "$(which bash-static)" bash-static
 echo "----Finding Init (chroot)----"
 if [ -e "${WORK_DIR}/kernelInit" ]; then
-  cp "${WORK_DIR}/kernelInit" "${IMAGE_DIR}"
+  put_top "${WORK_DIR}/kernelInit" kernelInit
 fi
-cp "${SCRIPT_DIR}/inferFile.sh" "${IMAGE_DIR}"
+put_top "${SCRIPT_DIR}/inferFile.sh" inferFile.sh
 FIRMAE_BOOT=${FIRMAE_BOOT} FIRMAE_ETC=${FIRMAE_ETC} chroot "${IMAGE_DIR}" /bash-static /inferFile.sh
 rm "${IMAGE_DIR}/bash-static"
 rm "${IMAGE_DIR}/inferFile.sh"
@@ -95,12 +107,14 @@ if [ -e "${IMAGE_DIR}/kernelInit" ]; then
 fi
 
 mv ${IMAGE_DIR}/firmadyne/init ${WORK_DIR}
-if [ -e ${IMAGE_DIR}/firmadyne/service ]; then
+# inferFile.sh writes this with `echo`; anything else (e.g. a symlink to a host
+# path) is not a result we copy out.
+if [ -f ${IMAGE_DIR}/firmadyne/service ] && [ ! -L ${IMAGE_DIR}/firmadyne/service ]; then
   cp ${IMAGE_DIR}/firmadyne/service ${WORK_DIR}
 fi
 
 echo "----Patching Filesystem (chroot)----"
-cp "${SCRIPT_DIR}/fixImage.sh" "${IMAGE_DIR}"
+put_top "${SCRIPT_DIR}/fixImage.sh" fixImage.sh
 FIRMAE_BOOT=${FIRMAE_BOOT} FIRMAE_ETC=${FIRMAE_ETC} chroot "${IMAGE_DIR}" /busybox ash /fixImage.sh
 rm "${IMAGE_DIR}/fixImage.sh"
 rm "${IMAGE_DIR}/busybox"
@@ -123,8 +137,9 @@ chmod a+x "${IMAGE_DIR}/firmadyne/network.sh"
 cp "${SCRIPT_DIR}/run_service.sh" "${IMAGE_DIR}/firmadyne/run_service.sh"
 chmod a+x "${IMAGE_DIR}/firmadyne/run_service.sh"
 
-cp "${SCRIPT_DIR}/injectionChecker.sh" "${IMAGE_DIR}/bin/a"
-chmod a+x "${IMAGE_DIR}/bin/a"
+INJECTION_CHECKER=`image_path /bin/a`
+cp "${SCRIPT_DIR}/injectionChecker.sh" "${INJECTION_CHECKER}"
+chmod a+x "${INJECTION_CHECKER}"
 
 touch "${IMAGE_DIR}/firmadyne/debug.sh"
 chmod a+x "${IMAGE_DIR}/firmadyne/debug.sh"
