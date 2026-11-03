@@ -138,7 +138,7 @@ def checkVariable(key):
 def stripTimestamps(data):
     lines = data.split(b"\n")
     # throw out the timestamps
-    prog = re.compile(b"^\[[^\]]*\] firmadyne: ")
+    prog = re.compile(rb"^\[[^\]]*\] firmadyne: ")
     lines = [prog.sub(b"", l) for l in lines]
     return lines
 
@@ -155,7 +155,7 @@ def findMacChanges(data, endianness):
     elif endianness == "el":
         fmt = "<I"
     prog = re.compile(
-        b"^ioctl_SIOCSIFHWADDR\[[^\]]+\]: dev:([^ ]+) mac:0x([0-9a-f]+) 0x([0-9a-f]+)"
+        rb"^ioctl_SIOCSIFHWADDR\[[^\]]+\]: dev:([^ ]+) mac:0x([0-9a-f]+) 0x([0-9a-f]+)"
     )
     for c in candidates:
         g = prog.match(c)
@@ -180,7 +180,7 @@ def findPorts(data, endianness):
     elif endianness == "el":
         fmt = "<I"
     prog = re.compile(
-        b"^inet_bind\[[^\]]+\]: proto:SOCK_(DGRAM|STREAM), ip:port: 0x([0-9a-f]+):([0-9]+)"
+        rb"^inet_bind\[[^\]]+\]: proto:SOCK_(DGRAM|STREAM), ip:port: 0x([0-9a-f]+):([0-9]+)"
     )
     portSet = {}
     for c in candidates:
@@ -209,7 +209,7 @@ def findNonLoInterfaces(data, endianness):
         fmt = ">I"
     elif endianness == "el":
         fmt = "<I"
-    prog = re.compile(b"^__inet_insert_ifa\[[^\]]+\]: device:([^ ]+) ifa:0x([0-9a-f]+)")
+    prog = re.compile(rb"^__inet_insert_ifa\[[^\]]+\]: device:([^ ]+) ifa:0x([0-9a-f]+)")
     for c in candidates:
         g = prog.match(c)
         if g:
@@ -230,8 +230,8 @@ def findIfacesForBridge(data, brif):
     progs = [
         re.compile(p % brif.encode())
         for p in [
-            b"^br_dev_ioctl\[[^\]]+\]: br:%s dev:(.*)",
-            b"^br_add_if\[[^\]]+\]: br:%s dev:(.*)",
+            rb"^br_dev_ioctl\[[^\]]+\]: br:%s dev:(.*)",
+            rb"^br_add_if\[[^\]]+\]: br:%s dev:(.*)",
         ]
     ]
     for c in candidates:
@@ -252,7 +252,7 @@ def findVlanInfoForDev(data, dev):
     results = []
     candidates = filter(lambda l: l.startswith(b"register_vlan_dev"), lines)
     prog = re.compile(
-        b"register_vlan_dev\[[^\]]+\]: dev:%s vlan_id:([0-9]+)" % dev.encode()
+        rb"register_vlan_dev\[[^\]]+\]: dev:%s vlan_id:([0-9]+)" % dev.encode()
     )
     for c in candidates:
         g = prog.match(c)

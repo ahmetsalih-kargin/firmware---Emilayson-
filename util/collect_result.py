@@ -30,12 +30,12 @@ for roots, dirs, files in os.walk(SCRATCH_DIR):
         web = Read(os.path.join(path, "web")).decode()
 
         rce_data = Read(os.path.join(path, "qemu.final.serial.log"))
-        rces = re.findall(b": echo (b33f\w+)", rce_data)
+        rces = re.findall(rb": echo (b33f\w+)", rce_data)
         if rces:
             rces = list(map(lambda x: x.decode(), rces))
 
         info_data = Read(os.path.join(path, "analysis_log", "rsf")).decode()
-        infos = re.findall("(b33f\w+)", info_data)
+        infos = re.findall(r"(b33f\w+)", info_data)
         rces.extend(infos)
         if rces:
             rces = sorted(set(rces))

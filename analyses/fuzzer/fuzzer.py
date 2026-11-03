@@ -278,7 +278,7 @@ def get_information():
         else:
             continue
 
-        regex = re.compile("result_xml.Set\(.*,.*\);")
+        regex = re.compile(r"result_xml.Set\(.*,.*\);")
         for script in scripts:
             for function_line in regex.findall(script):
                 key, value = function_line[15:-2].split(",")
