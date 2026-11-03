@@ -28,8 +28,13 @@ class docker_helper:
         self.count = len(containers)
         logging.debug("[*] current core : {}".format(self.count))
 
+    # All docker invocations use argument lists (no shell). Firmware file names
+    # and brands are passed to the in-container bash as positional parameters,
+    # never pasted into a command string (SECURITY.md S6).
+    RUN_IN_CONTAINER = 'cd /work/FirmAE && ./run.sh "$1" "$2" "/work/firmwares/$3"'
+
     def get_container_list(self, with_pause=False):
-        lines = sp.check_output("docker ps", shell=True).decode().split('\n')[1:-1]
+        lines = sp.check_output(["docker", "ps"]).decode().split('\n')[1:-1]
         ret = []
         for line in lines:
             if not with_pause and line.find("Paused") != -1:
@@ -39,47 +44,36 @@ class docker_helper:
         return ret[::-1]
 
     def stop_core(self, container_name):
-        return sp.check_output("docker stop {}".format(container_name), shell=True)
+        return sp.check_output(["docker", "stop", container_name])
 
     def run_core(self, idx, mode, brand, firmware_path, docker_name):
         firmware_root = os.path.dirname(firmware_path)
         firmware = os.path.basename(firmware_path)
-        cmd = """docker run -dit --rm \\
-                -v /dev:/dev \\
-                -v {0}:/work/FirmAE \\
-                -v {1}:/work/firmwares \\
-                --privileged=true \\
-                --name {2} \\
-                fcore""".format(self.firmae_root,
-                                firmware_root,
-                                docker_name)
-
-        sp.check_output(cmd, shell=True)
+        sp.check_output(["docker", "run", "-dit", "--rm",
+                         "-v", "/dev:/dev",
+                         "-v", "{}:/work/FirmAE".format(self.firmae_root),
+                         "-v", "{}:/work/firmwares".format(firmware_root),
+                         "--privileged=true",
+                         "--name", docker_name,
+                         "fcore"])
         logging.info("[*] {} emulation start!".format(docker_name))
         time.sleep(5)
-
-        docker_mode = "-it" if mode == "-d" else "-id"
-        cmd = "docker exec {0} \"{1}\" ".format(docker_mode, docker_name)
-        cmd += "bash -c \"cd /work/FirmAE && "
-        cmd += "./run.sh {0} {1} /work/firmwares/{2} ".format(mode,
-                                                              brand,
-                                                              firmware)
-        if mode == "-d":
-            cmd += "\""
-        else:
-            cmd += "2>&1 > /work/FirmAE/scratch/{0}.log\" &".format(firmware)
 
         t0 = time.time()
         iid = -1
         if mode == "-d":
-            os.system(cmd)
+            # interactive: attach the terminal
+            sp.call(["docker", "exec", "-it", docker_name, "bash", "-c",
+                     self.RUN_IN_CONTAINER, "_", mode, brand, firmware])
         else:
-            sp.check_output(cmd, shell=True)
+            # background inside the container; output goes to scratch/<fw>.log
+            sp.check_output(["docker", "exec", "-d", docker_name, "bash", "-c",
+                             self.RUN_IN_CONTAINER + ' > "/work/FirmAE/scratch/$3.log" 2>&1',
+                             "_", mode, brand, firmware])
         firmware_log = os.path.join(self.firmae_root, "scratch", firmware + ".log")
 
         if mode == "-r":
-            cmd = "docker exec -it \"{0}\" bash".format(docker_name)
-            os.system(cmd)
+            sp.call(["docker", "exec", "-it", docker_name, "bash"])
 
         if mode in ["-r", "-d"]:
             return docker_name
@@ -150,21 +144,24 @@ class docker_helper:
         return docker_name
 
     def run_command(self, core, cmd):
+        """Run the user's own command string in a container (`-c` mode)."""
         result = '[-] failed'
         try:
-            result = sp.check_output('docker exec -it {} bash -c "{}"'.format(core, cmd), shell=True).decode()
-        except:
-            pass
+            result = sp.check_output(["docker", "exec", core, "bash", "-c", cmd]).decode()
+        except (sp.CalledProcessError, OSError) as e:
+            logging.error("[-] %s: %s", core, e)
 
         return result
 
     def run_script(self, core, script):
+        """Copy the user's script into a container's / and run it (`-s` mode)."""
         result = '[-] failed'
         try:
-            sp.check_output('docker cp {} {}:/'.format(script, core), shell=True)
-            result = sp.check_output('docker exec -it {} /{}'.format(core, script), shell=True).decode()
-        except:
-            pass
+            sp.check_output(["docker", "cp", script, "{}:/".format(core)])
+            result = sp.check_output(["docker", "exec", core,
+                                      "/" + os.path.basename(script)]).decode()
+        except (sp.CalledProcessError, OSError) as e:
+            logging.error("[-] %s: %s", core, e)
 
         return result
 
@@ -195,9 +192,10 @@ class docker_helper:
     def get_docker_tap_ip(self, docker_name):
         result = 'None'
         try:
-            result = sp.check_output('docker exec -it {} bash -c "ip route"'.format(docker_name), shell=True).decode().split(' \r\n')[-2].split(' ')[0]
-        except:
-            pass
+            lines = sp.check_output(["docker", "exec", docker_name, "ip", "route"]).decode().strip().splitlines()
+            result = lines[-1].split(' ')[0]
+        except (sp.CalledProcessError, OSError, IndexError) as e:
+            logging.error("[-] %s: %s", docker_name, e)
 
         return result
 
