@@ -199,7 +199,9 @@ Dosya başına (host, `-x` ile kaynak edilen `firmae.config` sayıları `run.sh`
 ## Faz 2 — Güvenlik ve işlevsel düzeltmeler (2026-11-04)
 
 > Değişikliklerin listesi ve davranış değişiklikleri: `CHANGELOG.md`. Kod `653565b`
-> üzerine **commit edilmemiş** Faz 2 değişiklikleriyle test edildi.
+> üzerine **commit edilmemiş** Faz 2 değişiklikleriyle test edildi. Aynı içerik daha sonra
+> değiştirilmeden `refactor/hardening` dalına adım başına bir commit olarak alındı. Test
+> takımı 13 commit'in her birinde ayrı ayrı çalıştırıldı ve hepsinde geçti (54 → 106 test).
 
 ### Birim testleri
 

@@ -4,7 +4,7 @@
 > Hiçbir yazılım için mutlak güvenlik garantisi verilemez; bu belge tespit edilen riskleri,
 > uygulanan/önerilen önlemleri ve kalan riskleri listeler.
 >
-> **Faz 2'de giderilenler (commit edilmedi; testler ve sınırlar `TEST_REPORT.md` Faz 2):**
+> **Faz 2'de giderilenler (yerel `refactor/hardening` dalı; testler ve sınırlar `TEST_REPORT.md` Faz 2):**
 > S1 (fuzzer shell enjeksiyonu), S2 (dünya-yazılabilir scratch), S3 (getArch tar traversal),
 > S4 (`install.sh` `trust` satırı — mevcut kurulumlar elle güncellenmeli), S5 (imaj symlink'i
 > ile host'a yazma), S6 (docker-helper `shell=True`). S14 kısmen (`getArch.py` sorgusu
