@@ -2,12 +2,15 @@
 
 from xml.etree.ElementTree import parse
 from bs4 import BeautifulSoup
+import os
+import shutil
 import sys
 import subprocess
 import socket
 import time
 import datetime
 import re
+import fwscan
 import login
 import requests
 
@@ -19,14 +22,12 @@ WORK_DIR = None
 LOG_DIR = None
 LOGIN_TYPE = "unknown"
 SESSION = None
-UNIQ = "| sort | uniq"
-AWK_UNIQ = "| awk '{split($0,a,\":\"); print a[1]}'" + UNIQ
-CUT_CGI = " | sed 's@\\(\\.cgi\\).*@\\1@' | sed 's@.*\\(/\\)@\\1@' | sed 's@.*\\( \\)@\\1@' | sed 's@.*\\(\"\\)@\\1@'"
-GREP_CGI = " | grep -P '^/?[A-Za-z0-9]+\.cgi$'"
-GREP_PARAM = " | grep -P '^(\?)?[A-Za-z0-9]+=$'"
-GREP_HEADER = " | grep -P '^(\?)?[A-Za-z0-9]+:$'"
-GREP_HNAP = " | grep -P '/HNAP1/[A-Za-z0-9]+'"
-CUT_PARAM = " | sed 's@[a-z]*\\(\\=\\).*@\\1@' | sed 's@.*\\(?\\)@\\1@'"
+# Firmware file names are attacker-controlled, so scanning the extracted image
+# must never go through a shell (SECURITY.md S1). These are the regexes the old
+# `strings <file> | grep -P '...' | sort | uniq` pipelines used; see fwscan.py.
+CGI_REGEX = r"^/?[A-Za-z0-9]+\.cgi$"
+PARAM_REGEX = r"^(\?)?[A-Za-z0-9]+=$"
+HEADER_REGEX = r"^(\?)?[A-Za-z0-9]+:$"
 UPNP_REGEX = "[A-Za-z0-9-]+:[A-Za-z0-9:-]*"
 HNAP_REGEX = "/HNAP1/[A-Za-z0-9]+"
 
@@ -75,14 +76,11 @@ def readHTML(filepath):
     return ""
 
 
-def command(cmd):
-    try:
-        result = subprocess.check_output(cmd, shell=True)
-        result = result.decode().split("\n")[:-1]
-    except:
-        result = ""
-
-    return result
+def image_dir():
+    """Directory the image is extracted to (relative to the analyses/ cwd)."""
+    if not str(IID).isdigit():
+        raise ValueError("invalid image id: %r" % (IID,))
+    return "./{}".format(IID)
 
 
 def preprocess():
@@ -131,8 +129,12 @@ def get_open_port():
 
 
 def extract_image():
-    command("mkdir {} 2> /dev/null".format(IID))
-    command("tar xzf ../images/{}.tar.gz -C ./{} 2> /dev/null".format(IID, IID))
+    os.makedirs(image_dir(), exist_ok=True)
+    tarball = "../images/{}.tar.gz".format(IID)
+    res = subprocess.run(["tar", "xzf", tarball, "-C", image_dir()],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        print("[-] extracting {} failed: {}".format(tarball, res.stderr.decode(errors="replace").strip()))
 
 
 def get_information():
@@ -144,34 +146,36 @@ def get_information():
     param_map = {}
     ssdp_list = []
 
-    for filepath in command('find ./{} -executable -iname "*cgi*"'.format(IID)):
+    root = image_dir()
+    for filepath in fwscan.find_entries(root, "*cgi*", executable=True):
         binary_list.append(filepath)
-        for cgi in command("strings {} {} {}".format(filepath, GREP_CGI, UNIQ)):
+        for cgi in fwscan.strings_matching(filepath, CGI_REGEX):
             if cgi[0] != "/":
                 cgi = "/" + cgi
             if cgi != "" and cgi not in cgi_map["uri"]:
                 cgi_map["uri"].append(cgi)
-        for param in command("strings {} {} {}".format(filepath, GREP_PARAM, UNIQ)):
+        for param in fwscan.strings_matching(filepath, PARAM_REGEX):
             if param[0] == "?":
                 param = param[1:]
             if param != "" and param not in cgi_map["param"]:
                 cgi_map["param"].append(param)
 
-        for header in command("strings {} {} {}".format(filepath, GREP_HEADER, UNIQ)):
+        for header in fwscan.strings_matching(filepath, HEADER_REGEX):
             if header != "" and header not in cgi_map["header"]:
                 cgi_map["header"].append(header)
 
     # /htdocs/upnp/ssdpcgi -> /htdocs/cgibin in DIR-816L_REVB_FIRMWARE_PATCH_2.06.B09_BETA.ZIP
-    for filepath in command('find ./{} -iname "*.cgi"'.format(IID)):
+    for filepath in fwscan.find_entries(root, "*.cgi"):
         uri = filepath[filepath.rfind("/") :]
         if uri != "" and uri not in cgi_map["uri"]:
             cgi_map["uri"].append(uri)
 
     # get hnap information
-    for line in command(
-        "egrep -r 'soap:Envelope' ./{} | grep -P 'hnap/[A-Za-z0-9]+.xml'".format(IID)
-    ):
-        filepath = line[: line.find(":")]
+    # (was: egrep -r 'soap:Envelope' . | grep -P 'hnap/[A-Za-z0-9]+.xml')
+    hnap_rx = re.compile(r"hnap/[A-Za-z0-9]+.xml")
+    for filepath, matched in fwscan.grep_lines(root, rb"soap:Envelope"):
+        if not hnap_rx.search(filepath + ":" + matched):
+            continue
         hnap = "/HNAP1/" + filepath.split("/")[-1][:-4]
         if hnap in hnap_map:
             continue
@@ -184,14 +188,17 @@ def get_information():
                 data = data.decode()
             hnap_map[hnap] = data
 
-    for filename in command('find ./{} -name "*upnp*"'.format(IID)):
-        for line in command("strings {} | grep -P '{}'".format(filename, UPNP_REGEX)):
+    for filename in fwscan.find_entries(root, "*upnp*", ignore_case=False):
+        upnp_rx = re.compile(UPNP_REGEX)
+        for line in fwscan.strings_of(filename):
+            if not upnp_rx.search(line):
+                continue
             for item in re.findall(UPNP_REGEX, line):
                 if item not in ssdp_list:
                     ssdp_list.append(item)
 
     # TODO: more specify the grep
-    for filepath in command('egrep -ril "action=" ./{}'.format(IID)):
+    for filepath in fwscan.grep_files(root, rb"action=", ignore_case=True):
         if filepath.find(".htm") != -1:
             try:
                 soup = BeautifulSoup(readHTML(filepath), "html.parser")
@@ -257,7 +264,7 @@ def get_information():
                     action_map[action].append([method, param_map])
 
     # HNAP key value
-    for filepath in command('egrep -ril "result_xml.Set" ./{}'.format(IID)):
+    for filepath in fwscan.grep_files(root, rb"result_xml.Set", ignore_case=True):
         scripts = []
         if filepath.find(".htm") != -1:
             try:
@@ -338,16 +345,15 @@ def get_key_value(key):
 
 
 def clear_image():
-    command("rm -rf ./{} 2> /dev/null".format(IID))
+    shutil.rmtree(image_dir(), ignore_errors=True)
 
 
 def get_execve_log(dummy_length):
     execve_list = []
-    for line in command(
-        'strings {}/qemu.final.serial.log | grep "\[ANALYZE\]" | grep -i d34d'.format(
-            WORK_DIR
-        )
-    ):
+    serial_log = os.path.join(WORK_DIR, "qemu.final.serial.log")
+    for line in fwscan.strings_of(serial_log):
+        if "[ANALYZE]" not in line or "d34d" not in line.lower():
+            continue
         match = re.search("d34d[0-9]+", line, re.IGNORECASE).group()
 
         num = int(match[4:])
