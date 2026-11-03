@@ -1,0 +1,25 @@
+# FirmAE runs on Linux (directly, in Docker, or from a WSL/Linux clone). Scripts
+# checked out with CRLF line endings (Windows core.autocrlf=true) fail there:
+# "bash\r: not found", "python3\r: No such file or directory", broken `source`.
+# Keep everything that Linux executes, sources or parses as LF on every OS.
+
+* text=auto
+
+*.sh                text eol=lf
+*.py                text eol=lf
+firmae.config       text eol=lf
+core/sudo           text eol=lf
+core/Dockerfile     text eol=lf
+Makefile            text eol=lf
+*.c                 text eol=lf
+*.h                 text eol=lf
+database/schema     text eol=lf
+analyses/routersploit_patch text eol=lf
+analyses/fuzzer/hnap_pair   text eol=lf
+examples/*.list     text eol=lf
+pytest.ini          text eol=lf
+
+# test fixtures are compared byte-for-byte with generated output
+tests/fixtures/**   text eol=lf
+
+core/unstuff        binary
