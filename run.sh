@@ -72,6 +72,21 @@ BRAND=${2}
 WORK_DIR=""
 IID=-1
 
+# run_logged <log> <command...>
+# stdout AND stderr go to <log> (the old `2>&1 > <log>` sent stderr to the
+# terminal and kept it out of the log). On failure, show the end of the log and
+# stop with the command's exit code -- what `set -e` did before.
+function run_logged()
+{
+    local log=${1}
+    shift
+    "$@" > "${log}" 2>&1 && return 0
+    local rc=$?
+    echo -e "[\033[31m-\033[0m] $(basename "${1}") failed (exit ${rc}); last lines of ${log}:" >&2
+    tail -n 20 "${log}" >&2
+    exit ${rc}
+}
+
 function run_emulation()
 {
     echo "[*] ${1} emulation start!!!"
@@ -183,15 +198,15 @@ function run_emulation()
         # make qemu image
         # ================================
         t_start="$(date -u +%s.%N)"
-        python3 -u ./scripts/tar2db.py -i $IID -f ./images/$IID.tar.gz -h $PSQL_IP \
-            2>&1 > ${WORK_DIR}/tar2db.log
+        run_logged ${WORK_DIR}/tar2db.log \
+            python3 -u ./scripts/tar2db.py -i $IID -f ./images/$IID.tar.gz -h $PSQL_IP
         t_end="$(date -u +%s.%N)"
         time_tar="$(bc <<<"$t_end-$t_start")"
         echo $time_tar > ${WORK_DIR}/time_tar
 
         t_start="$(date -u +%s.%N)"
-        ./scripts/makeImage.sh $IID $ARCH $FILENAME \
-            2>&1 > ${WORK_DIR}/makeImage.log
+        run_logged ${WORK_DIR}/makeImage.log \
+            ./scripts/makeImage.sh $IID $ARCH $FILENAME
         t_end="$(date -u +%s.%N)"
         time_image="$(bc <<<"$t_end-$t_start")"
         echo $time_image > ${WORK_DIR}/time_image
@@ -203,9 +218,9 @@ function run_emulation()
         echo "[*] infer network start!!!"
         # TIMEOUT is set in "firmae.config". This TIMEOUT is used for initial
         # log collection.
-        TIMEOUT=$TIMEOUT FIRMAE_NET=${FIRMAE_NET} \
-          python3 -u ./scripts/makeNetwork.py -i $IID -q -o -a ${ARCH} \
-          2>&1 > ${WORK_DIR}/makeNetwork.log
+        run_logged ${WORK_DIR}/makeNetwork.log \
+          env TIMEOUT=$TIMEOUT FIRMAE_NET=${FIRMAE_NET} \
+          python3 -u ./scripts/makeNetwork.py -i $IID -q -o -a ${ARCH}
         ln -s ./run.sh ${WORK_DIR}/run_debug.sh | true
         ln -s ./run.sh ${WORK_DIR}/run_analyze.sh | true
         ln -s ./run.sh ${WORK_DIR}/run_boot.sh | true

@@ -23,7 +23,7 @@ ARCH=${2}
 
 echo "===== Check inferred emulation start ====="
 echo "[*] Inferred network: terminating after ${TIMEOUT} secs..."
-${WORK_DIR}/run.sh 2>&1 > ${WORK_DIR}/emulation.log &
+${WORK_DIR}/run.sh > ${WORK_DIR}/emulation.log 2>&1 &
 
 sleep 10
 
