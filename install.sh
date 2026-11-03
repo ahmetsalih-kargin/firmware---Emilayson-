@@ -17,7 +17,11 @@ sudo -u postgres bash -c "psql -c \"CREATE USER firmadyne WITH PASSWORD 'firmady
 sudo -u postgres createdb -O firmadyne firmware
 sudo -u postgres psql -d firmware < ./database/schema
 echo "listen_addresses = '172.17.0.1,127.0.0.1,localhost'" | sudo -u postgres tee --append /etc/postgresql/*/main/postgresql.conf
-echo "host all all 172.17.0.1/24 trust" | sudo -u postgres tee --append /etc/postgresql/*/main/pg_hba.conf
+# Docker containers (172.17.0.0/24) may reach only the firmware DB as firmadyne,
+# with a password. 'trust' for all databases/users would give every container on
+# docker0 password-less superuser access (SECURITY.md S4). 'md5' also accepts
+# scram-sha-256 stored passwords (PostgreSQL >= 14 default).
+echo "host firmware firmadyne 172.17.0.0/24 md5" | sudo -u postgres tee --append /etc/postgresql/*/main/pg_hba.conf
 
 sudo apt install -y libpq-dev
 python3 -m pip install psycopg2 psycopg2-binary
