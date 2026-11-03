@@ -32,9 +32,7 @@ IMAGE_DIR=`get_fs_mount ${IID}`
 
 echo "----Copying Filesystem Tarball----"
 mkdir -p "${WORK_DIR}"
-chmod a+rwx "${WORK_DIR}"
-chown -R "${USER}" "${WORK_DIR}"
-chgrp -R "${USER}" "${WORK_DIR}"
+secure_workdir "${WORK_DIR}"
 
 if [ ! -e "${WORK_DIR}/${IID}.tar.gz" ]; then
     if [ ! -e "${TARBALL_DIR}/${IID}.tar.gz" ]; then
@@ -47,7 +45,7 @@ fi
 
 echo "----Creating QEMU Image----"
 qemu-img create -f raw "${IMAGE}" 1G
-chmod a+rw "${IMAGE}"
+chmod 0644 "${IMAGE}"
 
 echo "----Creating Partition Table----"
 echo -e "o\nn\np\n1\n\n\nw" | /sbin/fdisk "${IMAGE}"

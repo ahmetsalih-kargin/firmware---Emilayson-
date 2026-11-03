@@ -125,7 +125,7 @@ function run_emulation()
 
     WORK_DIR=`get_scratch ${IID}`
     mkdir -p ${WORK_DIR}
-    chmod -R a+rwx "${WORK_DIR}"
+    secure_workdir "${WORK_DIR}"
     echo $FILENAME > ${WORK_DIR}/name
     echo $BRAND > ${WORK_DIR}/brand
     sync
