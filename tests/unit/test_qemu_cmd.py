@@ -80,15 +80,30 @@ def test_vlan_start_and_stop_network_snippets(firmae_env):
 
 
 def test_template_known_issues(firmae_env):
-    """KNOWN ISSUES locked in until Phases 3/5: predictable /tmp sockets
-    (S12), QEMU exit status discarded by `| true`, no trap-based cleanup."""
+    """KNOWN ISSUE locked in until Phase 5: predictable /tmp sockets (S12)."""
     out = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0")], [], "normal",
                      "mips", "el", "rdinit=/firmadyne/preInit.sh", False)
     assert "-monitor unix:/tmp/qemu.${IID},server,nowait" in out
     assert "-serial unix:/tmp/qemu.${IID}.S1,server,nowait" in out
+
+
+def test_template_cleans_up_on_every_exit_path(firmae_env):
+    """Phase 3: QEMU runs in the background under a cleanup trap (was a
+    foreground `qemu ... | true` with STOP_NET reached only on a normal end)."""
+    out = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0")], [], "normal",
+                     "mips", "el", "rdinit=/firmadyne/preInit.sh", False)
     qemu_last_line = [l for l in out.splitlines() if "-netdev" in l][-1]
-    assert qemu_last_line.endswith(" | true")
-    assert "trap " not in out
+    assert qemu_last_line.endswith(" &")
+    code = [l for l in out.splitlines() if not l.lstrip().startswith("#")]
+    # no pipeline into `true` any more (`wait ... || true` is fine)
+    assert not any(" | true" in l and " || true" not in l for l in code)
+    assert "trap cleanup EXIT" in out
+    for sig, code in (("INT", 130), ("TERM", 143), ("HUP", 129)):
+        assert "trap 'exit %d' %s" % (code, sig) in out
+    # STOP_NET lives in stop_net(), which only cleanup() calls -- exactly once
+    assert out.count("sudo tunctl -d ${TAPDEV_0}") == 1
+    assert out.index("stop_net () {") < out.index("sudo tunctl -d ${TAPDEV_0}") < out.index("cleanup () {")
+    assert out.index("NET_STARTED=true") < out.index("sudo tunctl -t ${TAPDEV_0}")
 
 
 def test_unsupported_architectures_raise(firmae_env):

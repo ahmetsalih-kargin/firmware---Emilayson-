@@ -12,8 +12,10 @@ import subprocess
 
 try:  # run as ./scripts/makeNetwork.py
     from imagepath import resolve_in_root
+    from procgroup import raise_on_sigterm, run_with_timeout
 except ImportError:  # imported as scripts.makeNetwork (tests)
     from scripts.imagepath import resolve_in_root
+    from scripts.procgroup import raise_on_sigterm, run_with_timeout
 
 debug = 0
 SCRATCHDIR = ""
@@ -64,7 +66,43 @@ QEMU_MACHINE=`get_qemu_machine ${ARCHEND}`
 QEMU_ROOTFS=`get_qemu_disk ${ARCHEND}`
 WORK_DIR=`get_scratch ${IID}`
 
+# Clean up on every exit path -- normal end, error (set -e), Ctrl-C, SIGTERM:
+# stop QEMU, release the image's mount and loop device, and remove the network
+# interfaces, even if START_NET failed half-way.
+QEMU_PID=""
+IMAGE_ATTACHED=false
+NET_STARTED=false
+stop_net () {
+    true
+%(STOP_NET)s
+}
+cleanup () {
+    local rc=$?
+    trap - EXIT INT TERM HUP
+    set +eu
+    if [ -n "${QEMU_PID}" ]; then
+        kill ${QEMU_PID} 2>/dev/null
+        wait_for_exit ${QEMU_PID} ${QEMU_STOP_GRACE}
+    fi
+    if mountpoint -q ${WORK_DIR}/image; then
+        umount ${WORK_DIR}/image
+    fi
+    if ${IMAGE_ATTACHED}; then
+        del_partition ${DEVICE:0:$((${#DEVICE}-2))}
+    fi
+    if ${NET_STARTED}; then
+        stop_net
+    fi
+    echo "Done!"
+    exit ${rc}
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 DEVICE=`add_partition "${WORK_DIR}/image.raw"`
+IMAGE_ATTACHED=true
 mount ${DEVICE} ${WORK_DIR}/image > /dev/null
 
 echo "%(NETWORK_TYPE)s" > ${WORK_DIR}/image/firmadyne/network_type
@@ -82,9 +120,14 @@ sleep 1
 sync
 umount ${WORK_DIR}/image > /dev/null
 del_partition ${DEVICE:0:$((${#DEVICE}-2))}
+IMAGE_ATTACHED=false
 
+NET_STARTED=true
 %(START_NET)s
 
+# QEMU runs in the background and we `wait` for it: bash does not run traps
+# while a foreground command is running, so Ctrl-C/SIGTERM reach cleanup()
+# immediately. Its exit status does not matter (was: `| true`).
 echo -n "Starting emulation of firmware... "
 %(QEMU_ENV_VARS)s ${QEMU} ${QEMU_BOOT} -m 1024 -M ${QEMU_MACHINE} -kernel ${KERNEL} \\
     %(QEMU_DISK)s -append "root=${QEMU_ROOTFS} console=ttyS0 nandsim.parts=64,64,64,64,64,64,64,64,64,64 %(QEMU_INIT)s rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=${FIRMAE_NET} FIRMAE_NVRAM=${FIRMAE_NVRAM} FIRMAE_KERNEL=${FIRMAE_KERNEL} FIRMAE_ETC=${FIRMAE_ETC} ${QEMU_DEBUG}" \\
@@ -92,39 +135,35 @@ echo -n "Starting emulation of firmware... "
     -serial unix:/tmp/qemu.${IID}.S1,server,nowait \\
     -monitor unix:/tmp/qemu.${IID},server,nowait \\
     -display none \\
-    %(QEMU_NETWORK)s | true
-
-%(STOP_NET)s
-
-echo "Done!"
+    %(QEMU_NETWORK)s &
+QEMU_PID=$!
+wait ${QEMU_PID} || true
+QEMU_PID=""
 """
 
 
 def mountImage(targetDir):
     loopFile = (
         subprocess.check_output(
-            [
-                "bash",
-                "-c",
-                "source firmae.config && add_partition %s/image.raw" % targetDir,
-            ]
+            ["bash", "-c", 'source firmae.config && add_partition "$1"', "_",
+             "%s/image.raw" % targetDir]
         )
         .decode()
         .strip()
     )
-    os.system("mount %s %s/image > /dev/null" % (loopFile, targetDir))
+    # A failed mount used to be ignored (os.system), and the following writes
+    # then went to the empty mount-point directory on the host.
+    subprocess.run(["mount", loopFile, "%s/image" % targetDir],
+                   stdout=subprocess.DEVNULL, check=True)
     time.sleep(1)
     return loopFile
 
 
 def umountImage(targetDir, loopFile):
-    os.system("umount %s/image > /dev/null" % targetDir)
+    subprocess.run(["umount", "%s/image" % targetDir], stdout=subprocess.DEVNULL, check=True)
     subprocess.check_output(
-        [
-            "bash",
-            "-c",
-            "source firmae.config && del_partition %s" % loopFile.rsplit("p", 1)[0],
-        ]
+        ["bash", "-c", 'source firmae.config && del_partition "$1"', "_",
+         loopFile.rsplit("p", 1)[0]]
     )
 
 
@@ -616,17 +655,19 @@ def inferNetwork(iid, arch, endianness, init):
 
     print("Running firmware %d: terminating after %d secs..." % (iid, TIMEOUT))
 
-    cmd = "timeout --preserve-status --signal SIGINT {0} ".format(TIMEOUT)
-    cmd += '{0}/run.{1}.sh "{2}" "{3}" '.format(
-        SCRIPTDIR, arch + endianness, iid, qemuInitValue
-    )
-    cmd += " 2>&1 > /dev/null"
-    os.system(cmd)
+    # Initial emulation in its own process group: after TIMEOUT seconds the
+    # group gets SIGINT (as with the old `timeout --signal SIGINT`), SIGKILL 15 s
+    # later if it is still there; on Ctrl-C/SIGTERM the group is stopped before
+    # we exit. stdout is discarded, stderr goes to makeNetwork.log, as before.
+    rc, timedOut = run_with_timeout(
+        ["%s/run.%s.sh" % (SCRIPTDIR, arch + endianness), str(iid), qemuInitValue],
+        TIMEOUT, stdout=subprocess.DEVNULL)
+    print("[*] initial emulation ended (%s, exit %s)" % ("timeout" if timedOut else "exited", rc))
 
     loopFile = mountImage(targetDir)
     if not os.path.exists(targetDir + "/image/firmadyne/nvram_files"):
         print("Infer NVRAM default file!\n")
-        os.system("{}/inferDefault.py {}".format(SCRIPTDIR, iid))
+        subprocess.call(["%s/inferDefault.py" % SCRIPTDIR, str(iid)])
     umountImage(targetDir, loopFile)
 
     data = open("%s/qemu.initial.serial.log" % targetDir, "rb").read()
@@ -818,7 +859,8 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
                 | stat.S_IXOTH,
             )
 
-            os.system('./scripts/check_emulation.sh {} {}'.format(iid, arch + endianness))
+            # not os.system(): that ignores SIGINT while it waits
+            subprocess.call(["./scripts/check_emulation.sh", str(iid), arch + endianness])
 
             if (
                 os.path.exists(SCRATCHDIR + "/" + str(iid) + "/web")
@@ -906,4 +948,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # SIGTERM/SIGHUP -> SystemExit, so run_with_timeout() stops the emulation's
+    # process group before we exit
+    raise_on_sigterm()
     main()
