@@ -76,16 +76,67 @@ IID=-1
 # stdout AND stderr go to <log> (the old `2>&1 > <log>` sent stderr to the
 # terminal and kept it out of the log). On failure, show the end of the log and
 # stop with the command's exit code -- what `set -e` did before.
+#
+# The step runs in the background and we `wait` for it: bash runs traps only
+# after a foreground command has finished, so Ctrl-C/SIGTERM would otherwise
+# wait for the whole step (up to many minutes) before cleanup could start.
+CHILD_PID=""
 function run_logged()
 {
     local log=${1}
+    local rc=0
     shift
-    "$@" > "${log}" 2>&1 && return 0
-    local rc=$?
+    "$@" > "${log}" 2>&1 &
+    CHILD_PID=$!
+    wait ${CHILD_PID} || rc=$?
+    CHILD_PID=""
+    [ ${rc} -eq 0 ] && return 0
     echo -e "[\033[31m-\033[0m] $(basename "${1}") failed (exit ${rc}); last lines of ${log}:" >&2
     tail -n 20 "${log}" >&2
     exit ${rc}
 }
+
+# run_interruptible <command...>: like running the command in the foreground
+# (same exit status, so set -e behaves as before) but Ctrl-C/SIGTERM reach the
+# cleanup trap at once.
+function run_interruptible()
+{
+    local rc=0
+    "$@" &
+    CHILD_PID=$!
+    wait ${CHILD_PID} || rc=$?
+    CHILD_PID=""
+    return ${rc}
+}
+
+# On every exit -- normal end, error, Ctrl-C, SIGTERM, SIGHUP -- stop what is
+# still running for the current image and release its QEMU, mount, loop
+# devices and TAP interfaces (release_emulation in firmae.config). Before
+# this, an interrupted run left QEMU running, which then held image.raw locked
+# and made the next run of the same firmware fail (TEST_REPORT.md Phase 0).
+function cleanup_on_exit()
+{
+    local rc=$?
+    local pid
+    trap - EXIT INT TERM HUP
+    set +eu
+    if [ -n "${CHILD_PID}" ]; then
+        kill ${CHILD_PID} 2>/dev/null
+        wait_for_exit ${CHILD_PID} 30
+    fi
+    for pid in `jobs -p`; do
+        kill ${pid} 2>/dev/null
+        wait_for_exit ${pid} 30
+    done
+    if [ "${IID}" != "-1" ] && [ -n "${IID}" ]; then
+        release_emulation ${IID}
+    fi
+    exit ${rc}
+}
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 function run_emulation()
 {
@@ -119,7 +170,7 @@ function run_emulation()
 
     # If the brand is not specified in the argument, it will be inferred 
     # automatically from the path of the image file.
-    timeout --preserve-status --signal SIGINT 300 \
+    run_interruptible timeout --preserve-status --signal SIGINT -k 30 300 \
         ./sources/extractor/extractor.py $brand_arg -sql $PSQL_IP -np \
         -nk $INFILE images 2>&1 >/dev/null
 
@@ -134,7 +185,7 @@ function run_emulation()
     # ================================
     # If the brand is not specified in the argument, it will be inferred 
     # automatically from the path of the image file.
-    timeout --preserve-status --signal SIGINT 300 \
+    run_interruptible timeout --preserve-status --signal SIGINT -k 30 300 \
         ./sources/extractor/extractor.py $brand_arg -sql $PSQL_IP -np \
         -nf $INFILE images 2>&1 >/dev/null
 
@@ -258,6 +309,7 @@ function run_emulation()
         if ($WEB_RESULT); then
             echo "[*] Waiting web service..."
             ${WORK_DIR}/run_analyze.sh &
+            EMU_PID=$!
             IP=`cat ${WORK_DIR}/ip`
             check_network ${IP} false
 
@@ -267,8 +319,9 @@ function run_emulation()
             cd -
 
             sync
-            kill $(ps aux | grep `get_qemu ${ARCH}` | awk '{print $2}') 2> /dev/null
-            sleep 2
+            # only this image's QEMU; then let run_analyze.sh tear its network down
+            stop_qemu ${IID}
+            wait_for_exit ${EMU_PID} 30
         else
             echo -e "[\033[31m-\033[0m] Web unreachable"
         fi
@@ -289,14 +342,15 @@ function run_emulation()
             done
             IP=`cat ${WORK_DIR}/ip`
             ./scratch/$IID/run_debug.sh &
+            EMU_PID=$!
             check_network ${IP} true
 
             sleep 10
             ./debug.py ${IID}
 
             sync
-            kill $(ps aux | grep `get_qemu ${ARCH}` | awk '{print $2}') 2> /dev/null | true
-            sleep 2
+            stop_qemu ${IID}
+            wait_for_exit ${EMU_PID} 30
         else
             echo -e "[\033[31m-\033[0m] Network unreachable"
         fi

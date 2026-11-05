@@ -24,6 +24,19 @@ ARCH=${2}
 echo "===== Check inferred emulation start ====="
 echo "[*] Inferred network: terminating after ${TIMEOUT} secs..."
 ${WORK_DIR}/run.sh > ${WORK_DIR}/emulation.log 2>&1 &
+RUN_PID=$!
+
+# Stop exactly this image's emulation and let run.sh finish its own cleanup
+# (network teardown) -- on the normal path below and when we are interrupted.
+finish () {
+    stop_qemu ${IID}
+    wait_for_exit ${RUN_PID} 30
+    # e.g. the check_network loop when we are interrupted while it runs
+    pkill -P $$ 2>/dev/null || true
+}
+trap 'finish; exit 130' INT
+trap 'finish; exit 143' TERM
+trap 'finish; exit 129' HUP
 
 sleep 10
 
@@ -52,9 +65,9 @@ if [ "${WEB_RESULT}" = "true" ]; then
     echo ${TIME_WEB} > ${WORK_DIR}/time_web
 fi
 
-# Kill the qemu process, but keep the 'grep' process itself.
-kill $(ps aux | grep `get_qemu ${ARCH}` | grep -v grep | awk '{print $2}') | true
+# Stop only this image's QEMU (the old `ps aux | grep qemu-system-<arch>`
+# killed every emulation of that architecture on the host).
+trap - INT TERM HUP
+finish
 
 echo "=====  Check inferred emulation end  ====="
-
-sleep 2
