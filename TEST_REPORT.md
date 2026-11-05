@@ -306,3 +306,54 @@ reddedildi (ilk çalıştırma geçersiz sayıldı). Test kümesi 5433'e taşın
 - Aynı mimariden iki firmware'in paralel çalıştırılması yeniden ölçülmedi (sabit
   `listen=:2001-2003` portları ve `hostfwd` Faz 5'te).
 - Kaynak sınırları (cgroup), eşzamanlılık kilidi ve metrikler (planın 4.7'si) uygulanmadı.
+
+
+---
+
+## Faz 4 — Python orkestrasyonu, kısmi (2026-11-05)
+
+> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `ec2370b` üzerine **commit
+> edilmemiş** Faz 4 değişiklikleriyle test edildi.
+
+**Kapsam:** yalnızca `run.sh`'ın aşama orkestrasyonu Python'a taşındı. `makeImage.sh`,
+`makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` (planın 4.2-4.5'i) **taşınmadı**;
+çünkü Faz 0-3'te ölçüp doğruladığım kodu yeni bir yetenek katmadan yeniden yazmak regresyon
+riski getiriyordu. Eşzamanlılık kilitleri ve metrikler (4.7) de yok.
+
+### Birim testleri
+WSL2, Python 3.12, root değil: **139 geçti, 0 başarısız** (Faz 3: 122). 17 yeni test
+(`test_pipeline.py`), gerçek `firmae.config` ile, sahte aşama script'leriyle: başarı;
+web yok → 50; kök dosya sistemi yok / extractor hatası → 10; imaj kimliği yok → 11 (scratch
+oluşmuyor); mimari boş / geçersiz → 20; imaj → 30 (log'un sonu gösteriliyor, ağ aşaması
+çalışmıyor); ağ → 40; Docker'da veritabanı → 12; sonucu zaten `true` olan firmware atlanıyor;
+`-b auto` yapışmıyor; dizin: üç dosyanın üçü de işleniyor, ortadaki başarısız, çıkış kodu 10;
+kullanım ve root denetimi; `VALID_ARCHS` ile `check_arch` tutarlılığı.
+
+### Gerçek emülasyon (Faz 3 ile karşılaştırma)
+
+| Senaryo | Sonuç |
+|---|---|
+| A normal ARM | ✅ web, 422 sn, exit 0, kaynak 0, sentinel hayatta |
+| B normal MIPS | ✅ web, 384 sn, exit 0, kaynak 0, mipsel sentinel hayatta |
+| F rastgele bayt | `result=extraction fail`, **exit 10** (Faz 0: exit 0), 3 sn |
+| F kesilmiş zip | `result=extraction fail`, **exit 10** (Faz 0: exit 0), 153 sn |
+| C Ctrl-C | `run.sh` 5 sn'de bitti; QEMU/loop/mount/TAP **ve /tmp soketi 0** |
+
+A ve B'de `run.sh` (IID/tap adı normalize edilmiş), IP, web, ping, mimari, init, ad, marka ve
+sonuç Faz 3 çıktısıyla **birebir aynı**; tek yeni dosya `firmae.log`. C'de Faz 3'te kalan
+2 `/tmp/qemu.*` soketi artık gerçek QEMU ile de kalmıyor (Faz 3 notu doğrulandı).
+
+### Ölçüm notları
+- Bu çalıştırmada C sıfırlamasız bırakıldığı için B firmware'i IID 2 aldı; karşılaştırmalar
+  buna göre yapıldı. İlk karşılaştırma betiğim yanlış IID'ye bakmıştı, düzeltilip tekrarlandı.
+- Test PostgreSQL'i 5433 portunda (Faz 3 notuna bakınız).
+
+### Test edilmeyenler
+- `-a` (analyze), `-d` (debug), `-r` (run), `-b` (boot) modları **çalıştırılmadı**:
+  `scripts/run_mode.sh` yalnızca `bash -n` düzeyinde kontrol edildi; analiz modu için
+  routersploit/Chrome/Selenium yok, debug/boot interaktif. Bu modların terminal ve sinyal
+  davranışı doğrulanmadı.
+- Docker modu (`FIRMAE_DOCKER`) yalnızca veritabanı denetimi için birim testlendi;
+  `docker-helper.py` ile uçtan uca denenmedi.
+- SIGTERM'in yalnızca `python3 -m firmae` sürecine gönderilmesi gerçek emülasyonla bu
+  fazda yeniden ölçülmedi (Faz 3'te `run.sh` için ölçülmüştü).

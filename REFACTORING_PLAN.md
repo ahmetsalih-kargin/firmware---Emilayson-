@@ -3,7 +3,7 @@
 > **Durum (2026-11-04):** Faz 0 ✅ (ölçümler `TEST_REPORT.md`) · Faz 1 ✅ (54 karakterizasyon
 > testi, FirmAE kodu değişmedi) · Faz 2 ✅ (2.1–2.9, 2.11, 2.12; 2.10 Faz 5.1'den sonraya
 > bırakıldı; ayrıntılar `CHANGELOG.md`; yerel `refactor/hardening` dalında adım başına bir
-> commit, push edilmedi) · Faz 3 onay bekliyor.
+> commit, push edilmedi) · Faz 3 ✅ (süreç/kaynak yaşam döngüsü, 4 commit) · Faz 4 kısmen (aşama orkestrasyonu Python'da; 4.2-4.5 ve 4.7 yapılmadı, commit edilmedi).
 > Mimari ayrıntılar: `ARCHITECTURE.md`. Güvenlik bulguları (S1…S18): `SECURITY.md`.
 
 ## Çalışma kuralları

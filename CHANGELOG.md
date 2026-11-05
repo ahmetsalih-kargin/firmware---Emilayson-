@@ -6,6 +6,32 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 4 — Python orchestration (partial: stage orchestration only)
+
+- New package `firmae/` (`errors`, `config`, `state`, `log`, `pipeline`, `__main__`).
+  `run.sh` is now a three-line wrapper (`python3 -m firmae`); the command line is
+  unchanged. The pipeline runs the same stages with the same messages, log file
+  names and `scratch/<IID>/` files; stage scripts are called with argument lists.
+  The terminal-bound modes (analyze, debug, run, boot) moved unchanged into
+  `scripts/run_mode.sh`.
+  - Behaviour change: **exit codes.** run.sh used to exit 0 whatever happened. Now:
+    0 ok, 2 usage, 3 not root / no config, 10 extraction failed, 11 no image id,
+    12 database unreachable (Docker), 20 architecture, 30 image, 40 network,
+    50 web unreachable (check mode), 124 timeout, 129/130/143 SIGHUP/SIGINT/SIGTERM.
+    The text in `scratch/<IID>/result` is unchanged.
+  - Behaviour change: a failing firmware no longer stops a directory run; all files
+    are processed and the exit code is the first failure's. Files of a directory are
+    processed in sorted order (was `find` order).
+  - Behaviour change: `-b auto` is resolved for every firmware (the old script
+    overwrote `BRAND` after the first file, so later files reused its brand).
+  - Behaviour change: usage errors exit 2 (was 1); in check mode "web unreachable" exits
+    50 (was 0).
+  - New: `scratch/<IID>/firmae.log`, every line with timestamp, level, image id and stage.
+  - Whatever the exit path, the image's QEMU, mount, loop devices, TAP/VLAN and
+    sockets are released after each firmware (previously only at the end of the script).
+- Not done (planned 4.2-4.5, 4.7): porting `makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`
+  and `check_emulation.sh` to Python, concurrency locks, resource limits, metrics.
+
 ### Phase 3 — process and resource lifecycle
 
 - `firmae.config`: `qemu_pids`/`stop_qemu` find and stop exactly one image's QEMU
