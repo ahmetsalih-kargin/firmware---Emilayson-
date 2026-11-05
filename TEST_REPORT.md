@@ -257,3 +257,52 @@ Faz 0'ın A ve B senaryoları, Faz 2 koduyla root olarak tekrar çalıştırıld
   Faz 3'e kadar **aynen duruyor**.
 - 2.10 (`findPorts` biçimi) bilinçli olarak uygulanmadı: Faz 5.1'de hostfwd `127.0.0.1`'e
   bağlanmadan, keşfedilen portları da tüm arayüzlerde açmış olurdu.
+
+---
+
+## Faz 3 — Süreç ve kaynak yaşam döngüsü (2026-11-04)
+
+> Ayrıntılar: `CHANGELOG.md`. `067f99e` üzerine **commit edilmemiş** Faz 3 değişiklikleriyle
+> test edildi. Soket temizliği (`rm -f /tmp/qemu.<IID>*`) ölçümden **sonra** eklendi;
+> ölçüm bu satır olmadan yapıldı, satır birim testiyle doğrulandı.
+
+### Birim testleri
+WSL2, Python 3.12, root değil, `-W error::SyntaxWarning`: **122 geçti, 0 başarısız**
+(Faz 2: 106). Yeni testler: `test_procgroup.py` (zaman aşımı, SIGINT→SIGKILL, torunların
+ölmesi, kesilme), `test_lifecycle_functions.py` (`stop_qemu` yalnızca kendi imajına
+dokunuyor, sentinel/mipsel/IID 11 hayatta; `add_partition` zaman aşımı;
+`release_emulation` idempotent), `test_generated_run_sh.py` (üretilen `run.sh` sahte
+komutlarla çalıştırıldı: normal bitiş, SIGTERM, Ctrl-C, `START_NET` hatası, imaj hazırlama
+hatası — hepsinde temizlik).
+
+### Gerçek emülasyon: Faz 0 ile karşılaştırma
+
+| Senaryo | Faz 0 | Faz 3 |
+|---|---|---|
+| **C** Ctrl-C (süreç grubuna SIGINT) | `run.sh` 60 sn sonra hâlâ çalışıyor; **QEMU=1**, soket=2 | `run.sh` **5 sn** içinde bitti; **QEMU=0**, loop/mount/TAP=0, soket=2 (bkz. not) |
+| **G** C'den sonra sıfırlamadan tekrar | ❌ `Failed to get "write" lock`, 1 sn, exit 1 | ✅ web erişilebilir, 432 sn, kaynak=0 |
+| **D** yalnızca `run.sh`'a SIGTERM | **QEMU=1**, soket=2 | `run.sh` 5 sn'de bitti; **QEMU=0**, soket=2 (bkz. not) |
+| **A** normal ARM + `qemu-system-arm-SENTINEL` | ✅ 452 sn; sentinel **öldürüldü** | ✅ 444 sn; sentinel **hayatta** |
+| **B** normal MIPS (mipseb) + `qemu-system-mipsel-SENTINEL` | ✅ 434 sn; sentinel **öldürüldü** | ✅ 406 sn; sentinel **hayatta** |
+
+**Not (soketler):** C ve D'de QEMU sinyalle durdurulunca `/tmp/qemu.1` ve `/tmp/qemu.1.S1`
+kaldı (QEMU bunları yalnızca temiz çıkışta siliyor). G'nin normal bitişi bunları
+temizledi. `release_emulation`'a silme satırı eklendi; bu satırın C/D'de gerçek QEMU ile
+tekrar ölçümü **yapılmadı**.
+
+### Ölçüm ortamı notu
+WSL'deki test PostgreSQL'i 5432'de açılamadı: o port Docker'daki başka bir PostgreSQL
+konteynerinde (kullanıcıya ait, dokunulmadı) ve FirmAE yanlış veritabanına bağlanıp
+reddedildi (ilk çalıştırma geçersiz sayıldı). Test kümesi 5433'e taşındı, ölçüm betiği
+`PGPORT=5433` ile çalıştırıldı. **Kod bu portu desteklemek için değişmedi**; psycopg2
+`PGPORT` ortam değişkenini kendisi okuyor.
+
+### Test edilmeyenler / kalan riskler
+- Final emülasyon (TAP oluşturulduktan sonra) sırasında Ctrl-C/SIGTERM gerçek QEMU ve
+  gerçek TAP ile denenmedi; yalnızca sahte komutlarla (`test_generated_run_sh.py`).
+- Debug/analiz/run/boot modlarının yeni trap ve `stop_qemu` yolları gerçek çalıştırmada
+  denenmedi (analiz modu için ayrıca `routersploit`/Chrome yok).
+- `extractor.py`'nin kendi geçici dizinleri (`/tmp/tmpXXXX`) bu fazda ele alınmadı.
+- Aynı mimariden iki firmware'in paralel çalıştırılması yeniden ölçülmedi (sabit
+  `listen=:2001-2003` portları ve `hostfwd` Faz 5'te).
+- Kaynak sınırları (cgroup), eşzamanlılık kilidi ve metrikler (planın 4.7'si) uygulanmadı.

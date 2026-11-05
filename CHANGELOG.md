@@ -6,6 +6,30 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 3 — process and resource lifecycle
+
+- `firmae.config`: `qemu_pids`/`stop_qemu` find and stop exactly one image's QEMU
+  (command line contains `/scratch/<IID>/image.raw`; SIGTERM, SIGKILL after 10 s).
+  `release_emulation` frees an image's QEMU, mount, loop devices, TAP/VLAN interfaces
+  and `/tmp/qemu.<IID>*` sockets; idempotent. `add_partition` uses
+  `losetup --find --show` and gives up after 30 s instead of waiting forever.
+  - Behaviour change: the old `ps aux | grep qemu-system-<arch> | kill` killed every
+    emulation of that architecture (mipseb also killed mipsel); only the image's own
+    QEMU is stopped now.
+- `scripts/procgroup.py`, `scripts/makeNetwork.py`: the initial emulation runs in its own
+  process group; after `TIMEOUT` it gets SIGINT, SIGKILL 15 s later; Ctrl-C/SIGTERM stop
+  the group before exit. Replaced `os.system` (it ignored SIGINT while waiting). A failed
+  `mount` is no longer ignored.
+- Generated `scratch/<IID>/run.sh`: QEMU runs in the background under a `cleanup` trap
+  (EXIT/INT/TERM/HUP) that stops QEMU, unmounts, detaches the loop device and removes
+  the TAP/VLAN interfaces, also when `START_NET` fails half-way or `set -e` exits
+  early. Exit codes 130/143/129 for signals.
+  - Behaviour change: QEMU's exit status is still ignored (as with `| true`).
+- `run.sh`, `scripts/check_emulation.sh`: cleanup traps; long steps run in the background
+  and are awaited, so Ctrl-C/SIGTERM act at once; extractor `timeout` gets `-k 30`.
+  - Behaviour change: an interrupted run now releases everything of its image and the
+    next run of the same firmware works (before: leaked QEMU held `image.raw` locked).
+
 ### Phase 2 — security and functional fixes
 
 #### Security
