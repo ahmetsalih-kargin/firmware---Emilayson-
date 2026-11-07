@@ -66,6 +66,8 @@ psql -d firmware -U firmadyne -h $PSQL_IP -t -q -c "DELETE from image WHERE id=$
 #Cleanup filesystem:
 echo "Clean up the file system ..."
 # (the old `[ -f "/tmp/qemu.${IID}*" ]` test never matched: the glob was quoted)
+# (older versions kept the sockets there; they now live in scratch/<IID>/run/,
+# which is removed with the rest of scratch/<IID> below)
 sudo rm -f "/tmp/qemu.${IID}" "/tmp/qemu.${IID}.S1"
 
 if [ -f ./images/${IID}.tar.gz ]; then

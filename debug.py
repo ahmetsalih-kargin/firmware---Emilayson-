@@ -65,7 +65,7 @@ class firmae_helper:
         self.telnetInit = True
 
     def connect_socat(self):
-        argv = ['socat', '-', 'UNIX-CONNECT:/tmp/qemu.' + str(self.iid) + '.S1']
+        argv = ['socat', '-', 'UNIX-CONNECT:./scratch/%d/run/serial1.sock' % self.iid]
         if os.getuid() != 0:
             argv.insert(0, 'sudo')
         subprocess.call(argv)

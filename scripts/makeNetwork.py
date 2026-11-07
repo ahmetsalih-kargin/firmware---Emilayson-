@@ -69,6 +69,11 @@ WORK_DIR=`get_scratch ${IID}`
 # Clean up on every exit path -- normal end, error (set -e), Ctrl-C, SIGTERM:
 # stop QEMU, release the image's mount and loop device, and remove the network
 # interfaces, even if START_NET failed half-way.
+# monitor and serial sockets: private directory of this image (was predictable
+# /tmp names; the monitor gives code execution with QEMU's privileges)
+mkdir -p -m 0700 ${WORK_DIR}/run
+rm -f ${WORK_DIR}/run/*.sock
+
 QEMU_PID=""
 IMAGE_ATTACHED=false
 NET_STARTED=false
@@ -132,8 +137,8 @@ echo -n "Starting emulation of firmware... "
 %(QEMU_ENV_VARS)s ${QEMU} ${QEMU_BOOT} -m 1024 -M ${QEMU_MACHINE} -kernel ${KERNEL} \\
     %(QEMU_DISK)s -append "root=${QEMU_ROOTFS} console=ttyS0 nandsim.parts=64,64,64,64,64,64,64,64,64,64 %(QEMU_INIT)s rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=${FIRMAE_NET} FIRMAE_NVRAM=${FIRMAE_NVRAM} FIRMAE_KERNEL=${FIRMAE_KERNEL} FIRMAE_ETC=${FIRMAE_ETC} ${QEMU_DEBUG}" \\
     -serial file:${WORK_DIR}/qemu.final.serial.log \\
-    -serial unix:/tmp/qemu.${IID}.S1,server,nowait \\
-    -monitor unix:/tmp/qemu.${IID},server,nowait \\
+    -serial unix:${WORK_DIR}/run/serial1.sock,server,nowait \\
+    -monitor unix:${WORK_DIR}/run/monitor.sock,server,nowait \\
     -display none \\
     %(QEMU_NETWORK)s &
 QEMU_PID=$!
@@ -315,7 +320,14 @@ def isDhcpIp(ip):
     return False
 
 
-def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports):
+def placeholderPort(iid, i):
+    """Loopback port of placeholder NIC i of image iid. One range of 4 ports per
+    image, so parallel emulations do not collide (was the fixed 2000-2003 on all
+    interfaces). Same formula as SOCK_BASE in scripts/run.<arch>.sh."""
+    return 20000 + (int(iid) % 10000) * 4 + i
+
+
+def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
     if arch == "arm":
         device = "virtio-net-device"
     else:
@@ -323,8 +335,8 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports):
 
     if not n:
         return (
-            "-device %(DEVICE)s,netdev=net%(I)i -netdev socket,id=net%(I)i,listen=:200%(I)i"
-            % {"DEVICE": device, "I": i}
+            "-device %(DEVICE)s,netdev=net%(I)i -netdev socket,id=net%(I)i,listen=127.0.0.1:%(PORT)i"
+            % {"DEVICE": device, "I": i, "PORT": placeholderPort(iid, i)}
         )
     else:
         (ip, dev, vlan, mac, brif) = n
@@ -335,11 +347,14 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports):
             # TODO: maybe need reverse ping checker
             # portfwd = ",hostfwd=udp::67-:67"
             # portfwd += ",hostfwd=udp::68-:68" # icmp port cannot foward
-            portfwd = "hostfwd=tcp::80-:80,hostfwd=tcp::443-:443,"
+            # restrict=on: the guest cannot reach the host or the outside world
+            # (explicit hostfwd rules are not affected); forwards listen on
+            # loopback only, so the emulated web UI is not exposed to the LAN
+            portfwd = "restrict=on,hostfwd=tcp:127.0.0.1:80-:80,hostfwd=tcp:127.0.0.1:443-:443,"
             for (proto, ip, port) in ports:
                 if port in [80, 443]:
                     continue
-                portfwd += "hostfwd=%(TYPE)s::%(PORT)i-:%(PORT)i," % {
+                portfwd += "hostfwd=%(TYPE)s:127.0.0.1:%(PORT)i-:%(PORT)i," % {
                     "TYPE": proto,
                     "PORT": port,
                 }
@@ -355,7 +370,7 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports):
             )
 
 
-def qemuNetworkConfig(arch, network, isUserNetwork, ports):
+def qemuNetworkConfig(arch, network, isUserNetwork, ports, iid=0):
     output = []
     assigned = []
     interfaceNum = 4
@@ -367,21 +382,21 @@ def qemuNetworkConfig(arch, network, isUserNetwork, ports):
             # need to connect the jth emulated network interface to the corresponding host interface
             if i == ifaceNo(n[1]):
                 output.append(
-                    qemuArchNetworkConfig(i, j, arch, n, isUserNetwork, ports)
+                    qemuArchNetworkConfig(i, j, arch, n, isUserNetwork, ports, iid)
                 )
                 assigned.append(n)
                 break
 
         # otherwise, put placeholder socket connection
         if len(output) <= i:
-            output.append(qemuArchNetworkConfig(i, i, arch, None, isUserNetwork, ports))
+            output.append(qemuArchNetworkConfig(i, i, arch, None, isUserNetwork, ports, iid))
 
     # find unassigned interfaces
     for j, n in enumerate(network[:interfaceNum]):
         if n not in assigned:
             # guess assignment
             print("Warning: Unmatched interface: %s" % (n,))
-            output[j] = qemuArchNetworkConfig(j, j, arch, n, isUserNetwork, ports)
+            output[j] = qemuArchNetworkConfig(j, j, arch, n, isUserNetwork, ports, iid)
             assigned.append(n)
 
     return " ".join(output)
@@ -530,7 +545,7 @@ def qemuCmd(
         "ARCHEND": arch + endianness,
         "QEMU_DISK": qemuDisk,
         "QEMU_INIT": qemuInitValue,
-        "QEMU_NETWORK": qemuNetworkConfig(arch, network, isUserNetwork, ports),
+        "QEMU_NETWORK": qemuNetworkConfig(arch, network, isUserNetwork, ports, iid),
         "QEMU_ENV_VARS": qemuEnvVars,
     }
 

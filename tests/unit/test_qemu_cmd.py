@@ -33,30 +33,39 @@ def test_generated_run_sh_matches_phase0_output(name, arch, end, read_fixture, f
 
 def test_arm_with_firmae_net_uses_single_nic(firmae_env):
     out = mn.qemuNetworkConfig("arm", [], False, [])
-    assert out == "-device virtio-net-device,netdev=net0 -netdev socket,id=net0,listen=:2000"
+    assert out == "-device virtio-net-device,netdev=net0 -netdev socket,id=net0,listen=127.0.0.1:20000"
 
 
-def test_mips_placeholder_nics_listen_on_all_interfaces(firmae_env):
-    """KNOWN ISSUE (SECURITY.md S8): placeholder NICs bind fixed ports 2000-2003
-    on all host interfaces; two emulations on one host collide."""
+def test_placeholder_nics_listen_on_loopback_in_a_per_image_port_range(firmae_env):
+    """Phase 5 (SECURITY.md S8): placeholder NICs used the fixed ports 2000-2003 on
+    ALL interfaces, so two emulations collided and the sockets were reachable
+    from the LAN. Now: 127.0.0.1, ports 20000 + 4*(IID % 10000) + n."""
     net = [("192.168.0.1", "eth0", None, None, "br0")]
-    out = mn.qemuNetworkConfig("mips", net, False, [])
+    out = mn.qemuNetworkConfig("mips", net, False, [], iid=7)
     assert out == (
         "-device e1000,netdev=net0 -netdev tap,id=net0,ifname=${TAPDEV_0},script=no "
-        "-device e1000,netdev=net1 -netdev socket,id=net1,listen=:2001 "
-        "-device e1000,netdev=net2 -netdev socket,id=net2,listen=:2002 "
-        "-device e1000,netdev=net3 -netdev socket,id=net3,listen=:2003")
+        "-device e1000,netdev=net1 -netdev socket,id=net1,listen=127.0.0.1:20029 "
+        "-device e1000,netdev=net2 -netdev socket,id=net2,listen=127.0.0.1:20030 "
+        "-device e1000,netdev=net3 -netdev socket,id=net3,listen=127.0.0.1:20031")
 
 
-def test_user_network_hostfwd_binds_all_interfaces(firmae_env):
-    """KNOWN ISSUE (SECURITY.md S8): DHCP-mode firmware gets hostfwd on host
-    ports 80/443 of ALL interfaces, without restrict=on."""
+def test_placeholder_port_ranges_of_different_images_do_not_overlap():
+    ranges = [set(mn.placeholderPort(iid, i) for i in range(4)) for iid in range(0, 200)]
+    assert all(not (a & b) for n, a in enumerate(ranges) for b in ranges[n + 1:])
+    assert all(1024 < min(r) and max(r) < 65536 for r in ranges + [set(mn.placeholderPort(9999, i) for i in range(4))])
+    assert mn.placeholderPort(987654, 3) == mn.placeholderPort(7654, 3) <= 65535
+
+
+def test_user_network_is_isolated_and_forwards_on_loopback_only(firmae_env):
+    """Phase 5 (SECURITY.md S8): DHCP-mode firmware used to get hostfwd on ports
+    80/443 of ALL interfaces and unrestricted access to the host's network."""
     net = [("10.0.2.15", "eth0", None, None, "br0")]
     out = mn.qemuArchNetworkConfig(0, 0, "mips", net[0], True,
                                    [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 80)])
-    assert out == ("-device e1000,netdev=net0 -netdev user,id=net0,"
-                   "hostfwd=tcp::80-:80,hostfwd=tcp::443-:443,hostfwd=tcp::8080-:8080")
-    assert "restrict=on" not in out
+    assert out == ("-device e1000,netdev=net0 -netdev user,id=net0,restrict=on,"
+                   "hostfwd=tcp:127.0.0.1:80-:80,hostfwd=tcp:127.0.0.1:443-:443,"
+                   "hostfwd=tcp:127.0.0.1:8080-:8080")
+    assert "hostfwd=tcp::" not in out and "hostfwd=udp::" not in out
 
 
 def test_unmatched_interface_is_guessed_by_position(firmae_env, capsys):
@@ -79,12 +88,15 @@ def test_vlan_start_and_stop_network_snippets(firmae_env):
     assert "sudo tunctl -d ${TAPDEV_0}" in stop
 
 
-def test_template_known_issues(firmae_env):
-    """KNOWN ISSUE locked in until Phase 5: predictable /tmp sockets (S12)."""
+def test_template_sockets_are_in_a_private_directory(firmae_env):
+    """Phase 5 (SECURITY.md S12): the QEMU monitor (code execution with QEMU's
+    privileges) was a predictable /tmp/qemu.<IID> socket."""
     out = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0")], [], "normal",
                      "mips", "el", "rdinit=/firmadyne/preInit.sh", False)
-    assert "-monitor unix:/tmp/qemu.${IID},server,nowait" in out
-    assert "-serial unix:/tmp/qemu.${IID}.S1,server,nowait" in out
+    assert "-monitor unix:${WORK_DIR}/run/monitor.sock,server,nowait" in out
+    assert "-serial unix:${WORK_DIR}/run/serial1.sock,server,nowait" in out
+    assert "/tmp/qemu" not in out
+    assert out.index("mkdir -p -m 0700 ${WORK_DIR}/run") < out.index("-monitor unix:")
 
 
 def test_template_cleans_up_on_every_exit_path(firmae_env):
@@ -113,3 +125,10 @@ def test_unsupported_architectures_raise(firmae_env):
         mn.qemuCmd(1, [], [], "None", "mips", "xx", "", False)
     with pytest.raises(Exception, match="Unsupported architecture"):
         mn.qemuCmd(1, [], [], "None", "ppc", "eb", "", False)
+
+
+def test_debug_py_and_cleanup_use_the_private_socket_directory(repo_root):
+    """The serial socket debug.py connects to moved with the QEMU command line."""
+    assert "scratch/%d/run/serial1.sock" in (repo_root / "debug.py").read_text()
+    assert "/tmp/qemu" not in (repo_root / "debug.py").read_text()
+    assert '"${SCRATCH_DIR}/${1}"/run/*.sock' in (repo_root / "firmae.config").read_text()

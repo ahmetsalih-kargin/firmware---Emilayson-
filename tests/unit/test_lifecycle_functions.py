@@ -155,5 +155,5 @@ def test_release_emulation_frees_everything_of_one_image(repo_root, tmp_path, fa
         "ip -o link show",
         "ip link delete tap1_0.2",
         "ip link delete tap1_0",
-        "rm -f /tmp/qemu.1 /tmp/qemu.1.S1",
+        "rm -f %s/scratch/1/run/*.sock /tmp/qemu.1 /tmp/qemu.1.S1" % root,
     ]

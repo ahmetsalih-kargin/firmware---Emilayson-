@@ -46,6 +46,11 @@ WORK_DIR=`get_scratch ${IID}`
 # Clean up on every exit path -- normal end, error (set -e), Ctrl-C, SIGTERM:
 # stop QEMU, release the image's mount and loop device, and remove the network
 # interfaces, even if START_NET failed half-way.
+# monitor and serial sockets: private directory of this image (was predictable
+# /tmp names; the monitor gives code execution with QEMU's privileges)
+mkdir -p -m 0700 ${WORK_DIR}/run
+rm -f ${WORK_DIR}/run/*.sock
+
 QEMU_PID=""
 IMAGE_ATTACHED=false
 NET_STARTED=false
@@ -126,10 +131,10 @@ echo -n "Starting emulation of firmware... "
  ${QEMU} ${QEMU_BOOT} -m 1024 -M ${QEMU_MACHINE} -kernel ${KERNEL} \
     -drive if=ide,format=raw,file=${IMAGE} -append "root=${QEMU_ROOTFS} console=ttyS0 nandsim.parts=64,64,64,64,64,64,64,64,64,64 rdinit=/firmadyne/preInit.sh rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=${FIRMAE_NET} FIRMAE_NVRAM=${FIRMAE_NVRAM} FIRMAE_KERNEL=${FIRMAE_KERNEL} FIRMAE_ETC=${FIRMAE_ETC} ${QEMU_DEBUG}" \
     -serial file:${WORK_DIR}/qemu.final.serial.log \
-    -serial unix:/tmp/qemu.${IID}.S1,server,nowait \
-    -monitor unix:/tmp/qemu.${IID},server,nowait \
+    -serial unix:${WORK_DIR}/run/serial1.sock,server,nowait \
+    -monitor unix:${WORK_DIR}/run/monitor.sock,server,nowait \
     -display none \
-    -device e1000,netdev=net0 -netdev tap,id=net0,ifname=${TAPDEV_0},script=no -device e1000,netdev=net1 -netdev socket,id=net1,listen=:2001 -device e1000,netdev=net2 -netdev socket,id=net2,listen=:2002 -device e1000,netdev=net3 -netdev socket,id=net3,listen=:2003 &
+    -device e1000,netdev=net0 -netdev tap,id=net0,ifname=${TAPDEV_0},script=no -device e1000,netdev=net1 -netdev socket,id=net1,listen=127.0.0.1:20005 -device e1000,netdev=net2 -netdev socket,id=net2,listen=127.0.0.1:20006 -device e1000,netdev=net3 -netdev socket,id=net3,listen=127.0.0.1:20007 &
 QEMU_PID=$!
 wait ${QEMU_PID} || true
 QEMU_PID=""
