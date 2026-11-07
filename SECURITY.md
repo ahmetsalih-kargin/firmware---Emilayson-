@@ -8,7 +8,12 @@
 > S1 (fuzzer shell enjeksiyonu), S2 (dünya-yazılabilir scratch), S3 (getArch tar traversal),
 > S4 (`install.sh` `trust` satırı — mevcut kurulumlar elle güncellenmeli), S5 (imaj symlink'i
 > ile host'a yazma), S6 (docker-helper `shell=True`). S14 kısmen (`getArch.py` sorgusu
-> parametreli). Diğer bulgular açık.
+> parametreli).
+>
+> **Faz 5'te kısmen giderilenler (commit edilmedi):** S8 (ilk emülasyonda `restrict=on`; `hostfwd` ve yer
+> tutucu soketler `127.0.0.1`'e bağlı, imaja özel portlar), S12 (QEMU monitor/seri soketleri
+> `scratch/<IID>/run/` altında, 0700). TAP modunda host erişimi ve DHCP modunun gerçek testi açık.
+> Diğer bulgular açık.
 
 ## 1. Tehdit modeli
 

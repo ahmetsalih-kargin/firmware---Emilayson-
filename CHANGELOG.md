@@ -6,6 +6,33 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 5 — network isolation (partial)
+
+- **S8** `scripts/run.<arch>.sh`: the initial emulation, where untrusted firmware runs for
+  the first time, used `-netdev user` without restrictions, so it could reach the host,
+  the LAN and the internet. `restrict=on` isolates the guest (DHCP still works).
+  The DHCP-mode final emulation (`makeNetwork.py`) gets `restrict=on` as well; explicit
+  `hostfwd` rules are not affected by it.
+  - Behaviour change: firmware cannot reach the outside world during the initial
+    emulation (e.g. ntp/dns/cloud calls fail instead of succeeding).
+- **S8** `scripts/makeNetwork.py`: `hostfwd` rules listen on `127.0.0.1` (were all
+  interfaces), so the emulated web UI is no longer exposed to the LAN. Placeholder NICs
+  (`-netdev socket`) listen on `127.0.0.1`, in a per-image range
+  `20000 + 4*(IID % 10000) + n` instead of the fixed `:2000-2003` on all interfaces, so
+  parallel emulations no longer collide.
+  - Behaviour change: the DHCP-mode web UI is reachable from the host itself only.
+- **S12** QEMU monitor and serial sockets moved from `/tmp/qemu.<IID>[.S1]` to
+  `scratch/<IID>/run/{monitor,serial1}.sock` (directory mode 0700). The monitor allows
+  code execution with QEMU's privileges. `debug.py`, `release_emulation` and `delete.sh`
+  follow; the old `/tmp` names are still removed.
+  - Behaviour change: scripts that connected to `/tmp/qemu.<IID>.S1` must use the new path.
+    Unix sockets cannot be created on Windows drives mounted in WSL (`/mnt/c`); keep the
+    project on the Linux file system.
+- Not done: dynamic host ports for `hostfwd` and the port-discovery fix (2.10): with the
+  discovery fixed, DHCP-mode firmware would try to forward tens of ports (22, 53, 161, ...)
+  and QEMU does not start when one is busy on the host; per-analysis network namespaces (5.4,
+  needs a separate decision). TAP-mode final emulation is not isolated from the host.
+
 ### Phase 4 — Python orchestration (partial: stage orchestration only)
 
 - New package `firmae/` (`errors`, `config`, `state`, `log`, `pipeline`, `__main__`).

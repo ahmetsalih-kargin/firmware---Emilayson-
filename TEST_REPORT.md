@@ -357,3 +357,46 @@ sonuç Faz 3 çıktısıyla **birebir aynı**; tek yeni dosya `firmae.log`. C'de
   `docker-helper.py` ile uçtan uca denenmedi.
 - SIGTERM'in yalnızca `python3 -m firmae` sürecine gönderilmesi gerçek emülasyonla bu
   fazda yeniden ölçülmedi (Faz 3'te `run.sh` için ölçülmüştü).
+
+
+---
+
+## Faz 5 — Ağ izolasyonu, kısmi (2026-11-08)
+
+> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `a6dcfe4` üzerine **commit edilmemiş**
+> Faz 5 değişiklikleriyle test edildi. Önceki oturum ölçüm sırasında kesildi (yarım kalan
+> çalıştırma kaynak bırakmamıştı); ölçüm baştan tekrarlandı.
+
+### Birim testleri
+WSL2, Python 3.12, root değil: **148 geçti, 0 başarısız** (Faz 4: 139). Yeni/değişen testler:
+ilk emülasyonun üç mimarisinde de her `-netdev user` için `restrict=on`; soketlerin
+`scratch/<IID>/run/` (mod 0700) içinde olması, `/tmp/qemu` kalmaması; eski kalıntı soketlerin
+başlamadan önce silinmesi; `FIRMAE_NET=false` yer tutucu NIC'lerinin `127.0.0.1` ve imaja özel
+portlarda dinlemesi; farklı imajların port aralıklarının çakışmaması; DHCP modunda `hostfwd`'nin
+`127.0.0.1`'e bağlı olması; `debug.py`/temizlik yollarının yeni dizini kullanması. Başlangıç
+emülasyonu testleri artık depoyu kirletmemek için geçici proje kopyasında çalışıyor.
+
+### Gerçek emülasyon (Faz 4 ile karşılaştırma)
+
+| Senaryo | Sonuç |
+|---|---|
+| A normal ARM (ilk emülasyon `restrict=on`) | ✅ web, 442 sn, exit 0, kaynak ve soket 0, sentinel hayatta |
+| B normal MIPS | ✅ web, 405 sn, exit 0, kaynak ve soket 0, mipsel sentinel hayatta |
+| C Ctrl-C | `run.sh` 5 sn'de bitti; QEMU/loop/mount/TAP ve `scratch/*/run/*.sock` **0** |
+
+A ve B'de ağ çıkarımı değişmedi: IP, web, ping, mimari, init, ad, marka ve sonuç Faz 4 ile
+aynı. Üretilen `run.sh`'ta yalnızca soket yolları, `mkdir` satırı ve MIPS'te yer tutucu NIC
+adresleri farklı (`listen=:2001` → `listen=127.0.0.1:20005`).
+
+### Test edilmeyenler / kalan riskler
+- **DHCP modu (`-netdev user` ile final emülasyon) hiç çalıştırılmadı:** elimde bu modu
+  tetikleyen (10.0.2.x / `.190` adresli) bir örnek firmware yok. `restrict=on` ve
+  `127.0.0.1` `hostfwd` yalnızca birim testi ve QEMU belgeleri düzeyinde doğrulandı;
+  `hostfwd`'nin `restrict=on` ile çalışmaya devam ettiği gerçek QEMU ile denenmedi.
+- **TAP modunda (A, B'nin final emülasyonu) misafir hâlâ host ağına bağlı:** TAP arayüzü
+  host'ta bir IP taşıyor; misafirin host'un o arayüzdeki servislerine erişimi engellenmedi.
+  Analiz başına ağ namespace'i (5.4) yapılmadı.
+- Ağ yalıtımı gerçek bir saldırıya karşı sınanmadı (ör. misafirin dışarı çıkmaya çalışması);
+  `restrict=on` etkisi bu fazda doğrudan ölçülmedi, yalnızca komut satırında doğrulandı.
+- `findPorts` hatası (2.10) ve dinamik `hostfwd` portları bilerek yapılmadı (bkz. CHANGELOG).
+- Soketler `/mnt/c` gibi Windows sürücülerinde oluşturulamaz.
