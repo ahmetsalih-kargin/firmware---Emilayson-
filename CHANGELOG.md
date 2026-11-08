@@ -6,7 +6,63 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
-### Phase 5 — network isolation (partial)
+### Review of Phases 0-5 (2026-11-08): bugs, security, memory, performance
+
+Found by static analysis, a ResourceWarning-strict test run, probes and real emulation;
+each item has a regression test (`tests/unit/test_audit_fixes.py` and others).
+
+- **Memory (regression I introduced in 2.1):** `analyses/fuzzer/fwscan.py` read whole files
+  into memory (+300 MB for a 300 MB file, +413 MB for `strings`); the shell tools it replaced
+  streamed. It now reads 1 MiB blocks; peak memory is bounded (test: < 16 MB for a 48 MB file).
+- **Disk/time:** `scripts/getArch.py` copied whole tar members (200 MB) to a temporary file
+  for `file`; it now copies the first 1 MiB (identical result, `file` reads the header).
+- **Bug (race, found in a real run):** `add_partition` (Phase 3 rewrite) returned as soon as
+  `/dev/loopNp1` existed; once, `mount` failed with ENOENT (`run.sh` exit 40). It now waits until
+  the kernel reports a size and udev has settled, and confirms the node is still there;
+  `mount_partition` retries the mount (makeImage.sh, generated run.sh, makeNetwork.py). The race
+  could NOT be reproduced in a 150-cycle stress test (0 failures before and after), so the fix
+  rests on the error message and reasoning, not on a reproduction; B, A, B then ran clean.
+- **Bug:** the log lines of a firmware written before its image id was known carried the id of
+  the previous firmware (`firmae/log.py`).
+- **Orphans:** `run_with_timeout` now also kills the process group after a NORMAL exit of a stage.
+- **Hangs:** helper scripts (database lookups, architecture detection) and the cleanup call have
+  timeouts (600 s / 180 s); `PGCONNECT_TIMEOUT=30` for psycopg2; the image id must be ASCII digits
+  (`str.isdigit()` also accepts e.g. "²").
+- **Security S14 (raised to P1):** `update_database("kernel_version", desc)` pasted binwalk's
+  description of the image (firmware content) into SQL: SQL injection from the firmware. Now
+  parameterised, column names checked against a list; `cur` could also be undefined (NameError).
+- **Security S13:** the database password comes from `FIRMAE_DB_PASSWORD` (default unchanged);
+  `install.sh` creates the role with it, `docker-helper.py` forwards it.
+- **Security S17:** `debug.py` tcpdump / file transfer no longer build shell commands.
+- **S18:** `console.c` checks the result of `open()` (precedence). The prebuilt `console.*`
+  downloaded by `download.sh` are not rebuilt.
+- `scripts/inferKernel.py` and `inferDefault.py` no longer use a shell.
+- ShellCheck: the `error` (SC2145) in `check_emulation.sh` and the SC2155/SC2174 warnings in
+  files I added are fixed; the remaining warnings are in code I did not write.
+- Tests: closed two files my own tests left open; the suite passes with ResourceWarning as error.
+- **Open, new:** S19 `util/compare.py` (see SECURITY.md).
+
+### Phase 5 — network isolation (TAP mode: firewall rules instead of namespaces)
+
+- **S8** `firmae.config` (`isolate_guest_network`, `unisolate_guest_network`), generated
+  `run.sh`, `release_emulation`, `delete.sh`: in TAP mode the guest ran on the other end of
+  a host interface and could open connections to every host service listening on that
+  address, and -- where the host forwards packets (Docker Desktop's WSL distribution has
+  `ip_forward=1`) -- reach the LAN through the host. Per address family (iptables and
+  ip6tables) two rules tagged `firmae:<IID>` match `tap<IID>_+` (TAP and its VLANs): new
+  connections from the guest to the host are dropped, nothing from the guest is forwarded.
+  Connections the host opens to the guest (web check, nmap, fuzzer, debug shell) are not
+  affected. The rules are applied after the network is up and before QEMU starts, and
+  removed on every exit path; the number of dropped connection attempts is recorded in
+  `scratch/<IID>/isolation`.
+  - Behaviour change: firmware cannot open connections to the host or beyond it.
+  - Behaviour change: if iptables is missing the emulation still runs, but a warning is
+    printed and `scratch/<IID>/isolation` says "not applied". `install.sh` installs iptables.
+  - Decision: per-analysis network namespaces (plan 5.4) were not used. Every host-side tool
+    (check_network, nmap, fuzzer, debug.py) would have to run inside the namespace; the
+    firewall rules reach the same goal for guest-to-host traffic without touching them.
+    The guest can still reach other guests on the same host only if the host forwards
+    between TAP interfaces; the FORWARD rule blocks that too.
 
 - **S8** `scripts/run.<arch>.sh`: the initial emulation, where untrusted firmware runs for
   the first time, used `-netdev user` without restrictions, so it could reach the host,

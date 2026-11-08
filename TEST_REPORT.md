@@ -388,6 +388,38 @@ A ve B'de ağ çıkarımı değişmedi: IP, web, ping, mimari, init, ad, marka v
 aynı. Üretilen `run.sh`'ta yalnızca soket yolları, `mkdir` satırı ve MIPS'te yer tutucu NIC
 adresleri farklı (`listen=:2001` → `listen=127.0.0.1:20005`).
 
+### Faz 5 kalanı: TAP modunda misafir yalıtımı (2026-11-08)
+
+> Adım 5.4 için ağ namespace'i yerine güvenlik duvarı kuralları kullanıldı (gerekçe: `CHANGELOG.md`).
+> `b598d5c` üzerine **commit edilmemiş** değişiklikle test edildi. WSL'de `iptables` kurulu
+> değildi, kuruldu; WSL'de `ip_forward=1` (Docker Desktop): misafir paketleri host üzerinden
+> yönlendirilebiliyordu.
+
+**Birim testleri:** WSL2, Python 3.12, root değil: **158 geçti, 0 başarısız** (önce 148). Yeni 10 test
+(`test_guest_isolation.py`, kuralları dosyada tutan sahte iptables/ip6tables ile): iki kural
+× iki aile, idempotent uygulama, başka imajın kurallarına dokunulmaması, düşürülen paket
+sayısının kaydı, yarım uygulanan kümenin geri alınması, iptables yoksa uyarı ama devam,
+`release_emulation`'ın kuralları kaldırması, üretilen `run.sh`'ta sıra (TAP → kurallar → QEMU;
+temizlikte kaldırma). Üretilen `run.sh`'ı çalıştıran testler de kuralların QEMU çalışırken
+var olduğunu, normal bitişte ve SIGTERM'de kaldırıldığını doğruladı.
+
+**Gerçek emülasyon:**
+
+| Senaryo | Sonuç |
+|---|---|
+| A normal ARM | ✅ web, 445 sn; kurallar çalışma sırasında 4 (12 örnekte), öncesinde/sonrasında 0; `isolation`: `applied: iptables ip6tables`, **misafirin host'a 6 yeni bağlantı denemesi düşürüldü** (IPv6: 0) |
+| B normal MIPS | ✅ web, 399 sn, kaynak ve kural 0, mipsel sentinel hayatta |
+| C Ctrl-C (ilk emülasyon) | `run.sh` 4 sn; QEMU/loop/mount/TAP/soket/kural 0 |
+| **H Ctrl-C, son emülasyon** (TAP=2, QEMU=1, kural=4, soket=2) | `run.sh` 5 sn'de bitti; 30 sn sonra **TAP, QEMU, loop, mount, soket ve kural 0** |
+
+H, Faz 3'ten beri açık kalan "son emülasyon sırasında kesme" boşluğunu da gerçek TAP ile kapatıyor.
+
+**Kalan riskler:** Yalıtım yalnızca misafirden host'a/yönlendirmeye gelen **yeni** bağlantıları kesiyor;
+L2 düzeyi (ARP, aynı TAP üzerinde yayın) kapsam dışı. Kuralların bir misafir saldırısıyla
+(host servisine bağlanma girişimi) sınanması yapılmadı; yalnızca düşürülen paket sayacı ve
+kural varlığı ölçüldü. Kendi güvenlik duvarı kuralları olan veya nftables-yalın (iptables
+olmayan) sistemlerde ve rootless Docker'da denenmedi.
+
 ### Test edilmeyenler / kalan riskler
 - **DHCP modu (`-netdev user` ile final emülasyon) hiç çalıştırılmadı:** elimde bu modu
   tetikleyen (10.0.2.x / `.190` adresli) bir örnek firmware yok. `restrict=on` ve
@@ -400,3 +432,33 @@ adresleri farklı (`listen=:2001` → `listen=127.0.0.1:20005`).
   `restrict=on` etkisi bu fazda doğrudan ölçülmedi, yalnızca komut satırında doğrulandı.
 - `findPorts` hatası (2.10) ve dinamik `hostfwd` portları bilerek yapılmadı (bkz. CHANGELOG).
 - Soketler `/mnt/c` gibi Windows sürücülerinde oluşturulamaz.
+
+
+---
+
+## Denetim: Faz 0-5 gözden geçirmesi (2026-11-08)
+
+> İstek: "eski fazlar tamamen bitti mi, güvenlik, bellek sızıntısı, bug, optimizasyon sorunu var mı".
+> Yöntem: ShellCheck, AST/derleme, `-X dev -W error::ResourceWarning` ile test, ölçüm
+> sondaları (büyük dosya, 40 firmware döngüsü), yeni kodun elle incelenmesi, gerçek emülasyon.
+> Her bulgunun düzeltmesi `CHANGELOG.md`'de; testler: **181 geçti, 0 başarısız, 0 uyarı**.
+
+**Kaynak sızıntısı ölçümleri**
+
+| Kontrol | Sonuç |
+|---|---|
+| 40 firmware boyunca orkestratör (fd, RSS) | fd 4 → 4, RSS 15.768 KB → 15.768 KB: **sızıntı yok** |
+| ResourceWarning (kapatılmayan dosya/soket) | Ürün kodunda **yok**; 2 tane test yardımcımdaydı, kapatıldı |
+| Sistem artıkları (loop, mount, TAP, QEMU, zombie, güvenlik duvarı kuralı, soket, `/tmp`) | Her senaryo sonrasında **0** (A, B, C, F, H) |
+| Fuzzer tarayıcısı, 300 MB dosya | **Bulundu: +300 MB / +413 MB RSS** → düzeltildi (1 MiB bloklar, tepe < 16 MB) |
+| getArch, 200 MB üye | **Bulundu:** 200 MB geçici dosya → 1 MB |
+| getArch ölçekleme | 500 / 3000 / 6000 aday üye: 1,9 / 13,7 / 30,9 sn (doğrusala yakın, üye başına ~4-5 ms = `file` süreci) |
+
+**Gerçek emülasyon (düzeltmelerden sonra):** A 451 ve 429 sn, B 399 ve 395 sn (hepsi `result=true`,
+kaynak 0, sentinel hayatta); F: iki bozuk girdi `exit=10`; H (son emülasyonda Ctrl-C): TAP/QEMU/kural/soket 0.
+**Bir B çalıştırması `exit=40` verdi** (`mount` ENOENT, yukarıdaki yarış); düzeltildi ama
+**yeniden üretilemedi**: 150 döngülük stres testinde eski ve yeni sürüm 0 hata verdi. Düzeltme hata
+mesajına ve udev davranışına dayanıyor, ölçülmüş bir kanıtı yok; B, A, B sonrası temiz çıktı.
+
+**Bu denetimde de test edilemeyenler:** analiz/debug/run/boot modları, Docker modu, DHCP (`-netdev user`) final
+emülasyonu, iki aynı mimari firmware'in paralel çalıştırılması, uzun süreli (saatlerce) çalışma.

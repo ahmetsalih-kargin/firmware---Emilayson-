@@ -1,5 +1,11 @@
 # FirmAE
 
+> **This is a modified fork of [pr0v3rbs/FirmAE](https://github.com/pr0v3rbs/FirmAE)** (MIT License, see
+> `LICENSE.txt`; copyright of the original authors is retained). The changes (security fixes, process and
+> resource handling, network isolation, a Python pipeline, tests) are described in `CHANGELOG.md`,
+> `SECURITY.md`, `ARCHITECTURE.md`, `REFACTORING_PLAN.md` and `TEST_REPORT.md`.
+
+
 FirmAE is a fully-automated framework that performs emulation and vulnerability
 analysis. FirmAE significantly increases the emulation success rate (From
 [Firmadyne](https://github.com/firmadyne/firmadyne)'s 16.28% to 79.36%) with

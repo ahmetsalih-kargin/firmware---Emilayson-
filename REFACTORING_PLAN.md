@@ -1,10 +1,22 @@
 # FirmAE Refactoring Planı
 
-> **Durum (2026-11-04):** Faz 0 ✅ (ölçümler `TEST_REPORT.md`) · Faz 1 ✅ (54 karakterizasyon
-> testi, FirmAE kodu değişmedi) · Faz 2 ✅ (2.1–2.9, 2.11, 2.12; 2.10 Faz 5.1'den sonraya
-> bırakıldı; ayrıntılar `CHANGELOG.md`; yerel `refactor/hardening` dalında adım başına bir
-> commit, push edilmedi) · Faz 3 ✅ (süreç/kaynak yaşam döngüsü, 4 commit) · Faz 4 kısmen (aşama orkestrasyonu Python'da; 4.2-4.5 ve 4.7 yapılmadı; yerel dalda 2 commit) · Faz 5 kısmen (5.1-5.3; 2.10 ve 5.4 yapılmadı, commit edilmedi).
-> Mimari ayrıntılar: `ARCHITECTURE.md`. Güvenlik bulguları (S1…S18): `SECURITY.md`.
+> **Tamamlanma durumu (2026-11-08).** Bu belge planı olduğu gibi tutar; gerçek durum aşağıda.
+> Ayrıntılı kanıt: `TEST_REPORT.md`, değişiklikler: `CHANGELOG.md`.
+
+| Faz | Durum | Yapılmayanlar / not |
+|---|---|---|
+| 0 Ölçüm | ✅ | — |
+| 1 Test iskeleti | ✅ | Kapsam: ağ çıkarımı, QEMU komutları, yaşam döngüsü, boru hattı (181 test). `extractor.py` ve `analyses/` büyük ölçüde testsiz |
+| 2 Güvenlik/işlevsel | ✅ 2.1–2.9, 2.11, 2.12 | **2.10 yapılmadı** (port keşfi: dinamik `hostfwd` portları olmadan zararlı) |
+| 3 Süreç/kaynak | ✅ | Plandaki ayrı `proc/resources` paketi yerine `firmae.config` + `scripts/procgroup.py`. **cgroup sınırları, eşzamanlılık kilidi yok** |
+| 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.6 (aşama orkestrasyonu, çıkış kodları, loglama). ❌ 4.2–4.5 (`makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` hâlâ Bash/eski Python), ❌ 4.7 (kilitler, metrikler) |
+| 5 Ağ izolasyonu | **kısmen** | ✅ 5.1–5.3; 5.4 ağ namespace'i yerine iptables kuralları. **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı |
+| **6 Peripheral (Problem 1)** | **❌ hiç başlanmadı** | I2C/SPI/GPIO ölçümü ve mock yok |
+| **7 Bağımlılık/kurulum** | **❌ hiç başlanmadı** | Eski bağımlılıklar, `download.sh` checksum, `apt-key`, chromedriver 2.38, `ubuntu:20.04`, Ubuntu 24.04'te `install.sh` |
+
+Üç ana problem: **Problem 1 (peripheral)** hiç ele alınmadı; **Problem 2 (monolitik Bash)** kısmen
+(orkestrasyon taşındı, aşama script'leri taşınmadı); **Problem 3 (kaynak/zombi)** büyük ölçüde çözüldü
+(ölçüldü), kaynak sınırları ve eşzamanlılık kilidi eksik.
 
 ## Çalışma kuralları
 
