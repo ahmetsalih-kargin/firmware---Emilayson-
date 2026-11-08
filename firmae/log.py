@@ -33,9 +33,13 @@ class Reporter:
         self._pending = []
 
     def close(self):
+        """End of one firmware: the next one's first lines must not carry this id."""
         if self._file:
             self._file.close()
             self._file = None
+        self.iid = None
+        self.stage = "-"
+        self._pending = []
 
     def say(self, kind, message, stage=None):
         if stage:

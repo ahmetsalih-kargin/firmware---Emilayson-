@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 import psycopg2
 import hashlib
@@ -20,7 +21,7 @@ def io_md5(target):
 def query_(query, psql_ip):
     try:
         dbh = psycopg2.connect(
-            database="firmware", user="firmadyne", password="firmadyne", host=psql_ip
+            database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip
         )
         cur = dbh.cursor()
         cur.execute(query)
@@ -60,7 +61,7 @@ def get_brand(infile, psql_ip):
 def check_connection(psql_ip):
     try:
         dbh = psycopg2.connect(
-            database="firmware", user="firmadyne", password="firmadyne", host=psql_ip
+            database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip
         )
         dbh.close()
         return 0

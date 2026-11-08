@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os.path
+import shlex
 import subprocess
 import signal
 import sys
@@ -83,13 +84,15 @@ class firmae_helper:
 
     def tcpdump(self):
         argument = input("sudo tcpdump -i tap%d " % self.iid)
-        os.system("sudo tcpdump -i tap%d %s" % (self.iid, argument))
+        subprocess.call(["sudo", "tcpdump", "-i", "tap%d" % self.iid] + shlex.split(argument))
 
     def file_transfer(self, target_filepath):
         file_name = os.path.basename(target_filepath)
         self.send("/firmadyne/busybox nc -lp 31339 > /firmadyne/%s &\n" % file_name)
         time.sleep(1)
-        os.system("cat " + target_filepath + " | nc " + self.targetIP + " 31339 &")
+        # file name and address are arguments, not shell text; the transfer runs in the background
+        with open(target_filepath, "rb") as source:
+            subprocess.Popen(["nc", self.targetIP, "31339"], stdin=source)
         while True:
             if self.sendrecv("ps\n").find("31339") != -1:
                 time.sleep(1)

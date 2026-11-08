@@ -67,7 +67,7 @@ fi
 
 echo "----Mounting QEMU Image Partition----"
 sync
-mount "${DEVICE}" "${IMAGE_DIR}"
+mount_partition "${DEVICE}" "${IMAGE_DIR}"
 
 echo "----Extracting Filesystem Tarball----"
 tar -xf "${WORK_DIR}/$IID.tar.gz" -C "${IMAGE_DIR}"

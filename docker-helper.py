@@ -49,7 +49,8 @@ class docker_helper:
     def run_core(self, idx, mode, brand, firmware_path, docker_name):
         firmware_root = os.path.dirname(firmware_path)
         firmware = os.path.basename(firmware_path)
-        sp.check_output(["docker", "run", "-dit", "--rm",
+        env_args = ["-e", "FIRMAE_DB_PASSWORD"] if "FIRMAE_DB_PASSWORD" in os.environ else []
+        sp.check_output(["docker", "run", "-dit", "--rm"] + env_args + [
                          "-v", "/dev:/dev",
                          "-v", "{}:/work/FirmAE".format(self.firmae_root),
                          "-v", "{}:/work/firmwares".format(firmware_root),

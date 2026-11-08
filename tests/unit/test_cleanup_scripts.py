@@ -28,6 +28,8 @@ def fake_system(tmp_path):
     stub(bindir, "sudo", 'exec "$@"')
     for name in ("kill", "umount", "rm", "psql"):
         stub(bindir, name, rec)
+    for fw in ("iptables", "ip6tables"):          # delete.sh also removes firewall rules
+        stub(bindir, fw, "exit 1")
     return bindir, log
 
 

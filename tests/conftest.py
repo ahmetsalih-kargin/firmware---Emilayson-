@@ -67,3 +67,40 @@ def firmae_env(monkeypatch):
         monkeypatch.setenv("TIMEOUT", timeout)
     _set()
     return _set
+
+
+IPTABLES_STUB = r'''#!/bin/bash
+# Fake iptables/ip6tables: keeps the rules in $IPT_STATE (one line per rule,
+# "<tool> <chain> <spec>"), logs every call to $LOG, never touches a real firewall.
+tool=$(basename "$0")
+echo "$tool $*" >> "$LOG"
+op=$1; shift
+case "$op" in
+  -I) chain=$1; shift
+      if [ -n "${IPT_FAIL_FORWARD:-}" ] && [ "$chain" = FORWARD ]; then exit 4; fi
+      echo "$tool $chain $*" >> "$IPT_STATE"; exit 0;;
+  -D) chain=$1; shift
+      line="$tool $chain $*"
+      grep -qxF -- "$line" "$IPT_STATE" 2>/dev/null || exit 1
+      grep -vxF -- "$line" "$IPT_STATE" > "$IPT_STATE.new"; mv "$IPT_STATE.new" "$IPT_STATE"; exit 0;;
+  -L) chain=$1
+      grep "^$tool $chain " "$IPT_STATE" 2>/dev/null | while read -r _ _ rest; do
+        tag=$(echo "$rest" | sed -n 's/.*--comment \(firmae:[0-9]*\).*/\1/p')
+        echo "   ${IPT_DROPPED:-7}      420 DROP       0    --  tap+ *       0.0.0.0/0  0.0.0.0/0  ctstate NEW /* $tag */"
+      done; exit 0;;
+esac
+exit 0
+'''
+
+
+@pytest.fixture
+def iptables_stubs():
+    """write_stubs(bindir, log, state) -> puts fake iptables and ip6tables in bindir."""
+    def write(bindir, log, state):
+        for name in ("iptables", "ip6tables"):
+            p = bindir / name
+            p.write_text(IPTABLES_STUB)
+            p.chmod(0o755)
+        state.write_text("")
+        return {"LOG": str(log), "IPT_STATE": str(state)}
+    return write

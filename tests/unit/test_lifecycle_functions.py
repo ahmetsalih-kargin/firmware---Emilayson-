@@ -50,8 +50,9 @@ def wait_started(procs):
     for p in procs:
         for _ in range(100):
             try:
-                if open("/proc/%d/cmdline" % p.pid, "rb").read().startswith(b"qemu-system-"):
-                    break
+                with open("/proc/%d/cmdline" % p.pid, "rb") as f:
+                    if f.read().startswith(b"qemu-system-"):
+                        break
             except FileNotFoundError:
                 break
             time.sleep(0.05)
@@ -121,6 +122,50 @@ def test_add_partition_gives_up_instead_of_waiting_forever(repo_root, tmp_path):
     assert time.time() - t0 < 10
 
 
+def test_add_partition_waits_until_the_device_is_really_ready(repo_root, tmp_path):
+    """Regression (found in review): after `losetup --partscan` the node can exist
+    and then be re-created while udev works on it; mount then failed with ENOENT.
+    The device must be ready, udev settled, and still ready afterwards."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "log"
+    stub(bindir, "losetup", 'echo /dev/fakeloop0')
+    stub(bindir, "udevadm", 'echo "udevadm $*" >> %s' % log)
+    script = '''
+        PARTITION_TIMEOUT=10
+        seq=(0 0 1 0 1 1); n=0                       # not ready, not ready, ready, GONE, ready, ready
+        partition_ready () { local r=${seq[n]:-1}; n=$((n+1)); [ "$r" = 1 ]; }
+        add_partition /x/image.raw > "%s"            # not in $(...): the counter must live in this shell
+        echo "`cat "%s"` calls=$n"
+    ''' % (tmp_path / "out", tmp_path / "out")
+    res = cfg(repo_root, script, extra_path=bindir)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "/dev/fakeloop0p1 calls=6"      # did not return at the first ready answer
+    assert log.read_text().splitlines() == ["udevadm settle --timeout=10"] * 2
+
+
+def test_mount_partition_retries_a_failing_mount(repo_root, tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    state = tmp_path / "n"
+    state.write_text("0")
+    stub(bindir, "mount", 'n=$(($(cat %s)+1)); echo $n > %s; echo "mount $*" >> %s; [ $n -ge 3 ]' % (state, state, tmp_path / "log"))
+    stub(bindir, "sleep", "exit 0")
+    res = cfg(repo_root, 'mount_partition /dev/loop1p1 /mnt/x; echo rc=$?', extra_path=bindir)
+    assert res.stdout.strip() == "rc=0"
+    assert (tmp_path / "log").read_text().count("mount /dev/loop1p1 /mnt/x") == 3
+    state.write_text("-100")                               # never succeeds
+    res = cfg(repo_root, 'mount_partition /dev/loop1p1 /mnt/x; echo rc=$?', extra_path=bindir)
+    assert res.stdout.strip() == "rc=1"
+
+
+def test_partition_ready_needs_a_block_device_with_a_size(repo_root, tmp_path):
+    res = cfg(repo_root, 'partition_ready /nonexistent && echo yes || echo no')
+    assert res.stdout.strip() == "no"
+    (tmp_path / "plain_file").write_text("x")
+    assert cfg(repo_root, 'partition_ready "%s" && echo yes || echo no' % (tmp_path / "plain_file")).stdout.strip() == "no"
+
+
 def test_release_emulation_frees_everything_of_one_image(repo_root, tmp_path, fake_qemus):
     root = tmp_path / "FirmAE"
     (root / "scratch" / "1" / "image").mkdir(parents=True)
@@ -136,6 +181,8 @@ def test_release_emulation_frees_everything_of_one_image(repo_root, tmp_path, fa
     stub(bindir, "losetup", rec + '; [ "$1" = -j ] && echo "/dev/loop5: []: (%s)" && echo "/dev/loop6: []: (%s)"' % (img, img))
     stub(bindir, "ip", rec + '; [ "$1" = -o ] && printf "%s\\n" "4: tap1_0: <UP>" "5: tap1_0.2@tap1_0: <UP>" "6: tap11_0: <UP>" "7: eth0: <UP>"')
     stub(bindir, "rm", rec)
+    for fw in ("iptables", "ip6tables"):          # release_emulation also removes firewall rules
+        stub(bindir, fw, "exit 1")
     qemu = fake_qemus("qemu-system-arm", img)
     other = fake_qemus("qemu-system-arm", str(root / "scratch" / "11" / "image.raw"))
     wait_started([qemu, other])

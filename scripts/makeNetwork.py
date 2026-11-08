@@ -71,7 +71,8 @@ WORK_DIR=`get_scratch ${IID}`
 # interfaces, even if START_NET failed half-way.
 # monitor and serial sockets: private directory of this image (was predictable
 # /tmp names; the monitor gives code execution with QEMU's privileges)
-mkdir -p -m 0700 ${WORK_DIR}/run
+mkdir -p ${WORK_DIR}/run
+chmod 0700 ${WORK_DIR}/run
 rm -f ${WORK_DIR}/run/*.sock
 
 QEMU_PID=""
@@ -97,6 +98,7 @@ cleanup () {
     fi
     if ${NET_STARTED}; then
         stop_net
+        unisolate_guest_network ${IID}
     fi
     echo "Done!"
     exit ${rc}
@@ -108,7 +110,7 @@ trap 'exit 129' HUP
 
 DEVICE=`add_partition "${WORK_DIR}/image.raw"`
 IMAGE_ATTACHED=true
-mount ${DEVICE} ${WORK_DIR}/image > /dev/null
+mount_partition ${DEVICE} ${WORK_DIR}/image > /dev/null
 
 echo "%(NETWORK_TYPE)s" > ${WORK_DIR}/image/firmadyne/network_type
 echo "%(NET_BRIDGE)s" > ${WORK_DIR}/image/firmadyne/net_bridge
@@ -129,6 +131,10 @@ IMAGE_ATTACHED=false
 
 NET_STARTED=true
 %(START_NET)s
+
+# the guest must not open connections to the host or be routed anywhere
+# (rules removed again by cleanup(); see isolate_guest_network in firmae.config)
+isolate_guest_network ${IID}
 
 # QEMU runs in the background and we `wait` for it: bash does not run traps
 # while a foreground command is running, so Ctrl-C/SIGTERM reach cleanup()
@@ -158,8 +164,17 @@ def mountImage(targetDir):
     )
     # A failed mount used to be ignored (os.system), and the following writes
     # then went to the empty mount-point directory on the host.
-    subprocess.run(["mount", loopFile, "%s/image" % targetDir],
-                   stdout=subprocess.DEVNULL, check=True)
+    # The partition node can still be settling right after add_partition; retry
+    # briefly before giving up.
+    for attempt in range(5):
+        res = subprocess.run(["mount", loopFile, "%s/image" % targetDir],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if res.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        sys.stderr.write(res.stderr.decode(errors="replace"))
+        raise subprocess.CalledProcessError(res.returncode, res.args)
     time.sleep(1)
     return loopFile
 

@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     close(1);
     close(0);
 
-    if ((fd = open("/firmadyne/ttyS1", O_RDWR, 0) == -1)) {
+    if ((fd = open("/firmadyne/ttyS1", O_RDWR, 0)) == -1) {
         perror("cons: Could not open \"/firmadyne/ttyS1\": ");
         return -1;
     }

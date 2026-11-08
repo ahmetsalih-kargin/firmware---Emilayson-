@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import tarfile
 import getopt
 import sys
@@ -105,7 +106,7 @@ def insertObjectToImage(iid, files2oids, links, cur):
 def process(iid, infile):
     global psql_ip
     dbh = psycopg2.connect(
-        database="firmware", user="firmadyne", password="firmadyne", host=psql_ip
+        database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip
     )
     cur = dbh.cursor()
 

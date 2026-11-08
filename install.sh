@@ -13,7 +13,9 @@ sudo usermod -aG docker $USER
 # postgresql
 sudo apt install -y postgresql
 sudo /etc/init.d/postgresql restart
-sudo -u postgres bash -c "psql -c \"CREATE USER firmadyne WITH PASSWORD 'firmadyne';\""
+# the password FirmAE's scripts use can be changed with FIRMAE_DB_PASSWORD (default: firmadyne)
+# (psql substitutes :'pw' safely quoted from stdin, but not inside -c)
+echo "CREATE USER firmadyne WITH PASSWORD :'pw';" | sudo -u postgres psql -v pw="${FIRMAE_DB_PASSWORD:-firmadyne}"
 sudo -u postgres createdb -O firmadyne firmware
 sudo -u postgres psql -d firmware < ./database/schema
 echo "listen_addresses = '172.17.0.1,127.0.0.1,localhost'" | sudo -u postgres tee --append /etc/postgresql/*/main/postgresql.conf
@@ -26,7 +28,7 @@ echo "host firmware firmadyne 172.17.0.0/24 md5" | sudo -u postgres tee --append
 sudo apt install -y libpq-dev
 python3 -m pip install psycopg2 psycopg2-binary
 
-sudo apt install -y busybox-static bash-static fakeroot dmsetup kpartx netcat-openbsd nmap python3-psycopg2 snmp uml-utilities util-linux vlan
+sudo apt install -y busybox-static bash-static fakeroot dmsetup kpartx netcat-openbsd nmap python3-psycopg2 snmp uml-utilities util-linux vlan iptables
 
 # for binwalk
 wget https://github.com/ReFirmLabs/binwalk/archive/refs/tags/v2.3.4.tar.gz && \

@@ -59,6 +59,9 @@ for IFACE in `echo "${IFACES}" | grep '\.' || true` `echo "${IFACES}" | grep -v 
     sudo ip link delete "${IFACE}" || true
 done
 
+# firewall rules that isolate the guest (see isolate_guest_network in firmae.config)
+sudo bash -c 'source ./firmae.config && unisolate_guest_network "$1"' _ ${IID} || true
+
 #Cleanup database:
 echo "Remove the database entries ..."
 psql -d firmware -U firmadyne -h $PSQL_IP -t -q -c "DELETE from image WHERE id=${IID};"

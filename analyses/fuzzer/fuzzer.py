@@ -190,7 +190,7 @@ def get_information():
 
     for filename in fwscan.find_entries(root, "*upnp*", ignore_case=False):
         upnp_rx = re.compile(UPNP_REGEX)
-        for line in fwscan.strings_of(filename):
+        for line in fwscan.iter_strings(filename):
             if not upnp_rx.search(line):
                 continue
             for item in re.findall(UPNP_REGEX, line):
@@ -351,7 +351,7 @@ def clear_image():
 def get_execve_log(dummy_length):
     execve_list = []
     serial_log = os.path.join(WORK_DIR, "qemu.final.serial.log")
-    for line in fwscan.strings_of(serial_log):
+    for line in fwscan.iter_strings(serial_log):
         if "[ANALYZE]" not in line or "d34d" not in line.lower():
             continue
         match = re.search("d34d[0-9]+", line, re.IGNORECASE).group()

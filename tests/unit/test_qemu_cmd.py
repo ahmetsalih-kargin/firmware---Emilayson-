@@ -96,7 +96,7 @@ def test_template_sockets_are_in_a_private_directory(firmae_env):
     assert "-monitor unix:${WORK_DIR}/run/monitor.sock,server,nowait" in out
     assert "-serial unix:${WORK_DIR}/run/serial1.sock,server,nowait" in out
     assert "/tmp/qemu" not in out
-    assert out.index("mkdir -p -m 0700 ${WORK_DIR}/run") < out.index("-monitor unix:")
+    assert out.index("mkdir -p ${WORK_DIR}/run\nchmod 0700 ${WORK_DIR}/run") < out.index("-monitor unix:")
 
 
 def test_template_cleans_up_on_every_exit_path(firmae_env):

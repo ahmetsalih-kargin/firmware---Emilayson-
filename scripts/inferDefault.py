@@ -2,6 +2,7 @@
 
 import sys
 import os
+import shutil
 import subprocess
 
 
@@ -69,9 +70,7 @@ def Log(default_list):
                 fileType = output.split(" ", 1)[1].replace(" ", "_")
                 if fileType.find("symbolic") == -1:
                     f.write("{} {} {}\n".format(path, j, fileType))
-        os.system(
-            "cp ./scratch/{}/nvram_files ./scratch/{}/image/firmadyne/".format(IID, IID)
-        )
+        shutil.copy("./scratch/{}/nvram_files".format(IID), "./scratch/{}/image/firmadyne/".format(IID))
 
 
 if __name__ == "__main__":

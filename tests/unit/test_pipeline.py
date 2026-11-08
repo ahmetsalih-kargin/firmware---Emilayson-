@@ -276,3 +276,62 @@ def test_valid_archs_match_check_arch(repo_root):
         rc = subprocess.run(["bash", "-c", 'source ./firmae.config && check_arch "$1"', "_", arch],
                             cwd=repo_root, capture_output=True).returncode
         assert (rc == 1) == (arch in config.VALID_ARCHS)     # check_arch returns 1 for VALID
+
+
+# ------------------------------------------------- audit fixes (Phase 5 review)
+
+def test_log_labels_do_not_carry_over_to_the_next_firmware(tmp_path):
+    r = Reporter(out=io.StringIO(), color=False)
+    r.bind("111", str(tmp_path / "a.log"))
+    r.info("first firmware", "arch")
+    r.close()
+    r.info("second firmware started", "start")          # image id not known yet
+    r.bind("222", str(tmp_path / "b.log"))
+    r.close()
+    first_line = (tmp_path / "b.log").read_text().splitlines()[0]
+    assert "[iid=-][start] second firmware started" in first_line and "111" not in first_line
+
+
+def test_unicode_digits_are_not_an_image_id(project, monkeypatch):
+    monkeypatch.setenv("STUB_IID", "²")            # "²".isdigit() is True
+    code, out, _ = run(project)
+    assert code == ExitCode.IMAGE_ID
+    assert not (project / "scratch").exists()
+
+
+def test_a_hanging_helper_times_out_instead_of_hanging_forever(project, monkeypatch):
+    from firmae import pipeline
+    monkeypatch.setattr(pipeline, "CAPTURE_TIMEOUT", 1)
+    (project / "scripts/util.py").write_text("#!/bin/bash\nsleep 30\n")
+    code, out, _ = run(project)
+    assert code == ExitCode.TIMEOUT == 124
+    assert "util.py timed out after 1s" in out
+
+
+def test_database_connect_timeout_is_set_for_helpers(project, monkeypatch):
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    assert config.load(str(project)).env()["PGCONNECT_TIMEOUT"] == "30"
+    monkeypatch.setenv("PGCONNECT_TIMEOUT", "5")                 # an explicit setting wins
+    assert config.load(str(project)).env()["PGCONNECT_TIMEOUT"] == "5"
+
+
+def test_many_firmwares_leak_neither_file_descriptors_nor_memory(project):
+    """40 firmwares through one Pipeline: open fds and resident memory stay flat."""
+    cfg = config.load(str(project))
+    pipe = Pipeline(cfg, "check", "dlink", Reporter(out=io.StringIO(), color=False))
+    fds = lambda: len(os.listdir("/proc/self/fd"))
+    def rss():
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
+
+    def one(i):
+        assert pipe.run_firmware("/x/fw%d.zip" % i) == ExitCode.OK
+        shutil.rmtree(project / "scratch")
+
+    for i in range(5):                   # warm-up (imports, caches)
+        one(i)
+    fd0, rss0 = fds(), rss()
+    for i in range(40):
+        one(i)
+    assert fds() == fd0
+    assert rss() - rss0 < 4096           # KB; the measured growth over 40 runs is 0

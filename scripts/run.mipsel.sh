@@ -21,7 +21,8 @@ QEMU_INIT=${2}
 
 WORK_DIR=`get_scratch ${IID}`
 # sockets live in a private directory of this image (was predictable /tmp names)
-mkdir -p -m 0700 "${WORK_DIR}/run"
+mkdir -p "${WORK_DIR}/run"
+chmod 0700 "${WORK_DIR}/run"
 rm -f "${WORK_DIR}"/run/*.sock
 # one loopback port range per image for the unused placeholder NICs
 SOCK_BASE=$((20000 + (IID % 10000) * 4))

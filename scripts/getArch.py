@@ -33,6 +33,7 @@ archMap = {
 endMap = {"LSB": "el", "MSB": "eb"}
 
 # Members whose type is worth checking, in the order the tar lists them.
+HEAD_BYTES = 1 << 20     # `file` needs only the header; never copy a whole 500 MB member
 BINARY_HINTS = ["/busybox", "/alphapd", "/boa", "/http", "/hydra", "/helia", "/webs"]
 DIR_HINTS = ["/sbin/", "/bin/"]
 
@@ -73,7 +74,7 @@ def file_type_of(tar, member, workdir):
         return None
     target = os.path.join(workdir, "member")
     with src, open(target, "wb") as dst:
-        shutil.copyfileobj(src, dst)
+        dst.write(src.read(HEAD_BYTES))
     try:
         return subprocess.check_output(["file", target]).decode(errors="replace")
     finally:
@@ -117,7 +118,7 @@ def write_file_list(iid, names):
 
 def record(iid, archend, filetype, psql_ip):
     import psycopg2
-    dbh = psycopg2.connect(database="firmware", user="firmadyne", password="firmadyne", host=psql_ip)
+    dbh = psycopg2.connect(database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip)
     try:
         cur = dbh.cursor()
         cur.execute("UPDATE image SET arch = %s WHERE id = %s;", (archend, int(iid)))

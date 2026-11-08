@@ -23,6 +23,8 @@ from .errors import ExitCode, FirmAEError
 from .state import State
 
 EXTRACT_TIMEOUT = 300       # seconds, as before
+CAPTURE_TIMEOUT = 600       # helper scripts (database lookups, architecture detection)
+RELEASE_TIMEOUT = 180       # cleanup of one image's resources
 EXTRACT_GRACE = 30          # SIGKILL this long after SIGINT (was: no escalation)
 LOG_TAIL_LINES = 20
 
@@ -40,14 +42,23 @@ class Pipeline:
 
     def _bash_fn(self, name, *args):
         """Call a function of firmae.config (secure_workdir, release_emulation)."""
-        return subprocess.run(
-            ["bash", "-c", 'source ./firmae.config && "$@"', "_", name] + [str(a) for a in args],
-            cwd=self.cfg.root, env=self.cfg.env(), stdout=subprocess.DEVNULL).returncode
+        try:
+            return subprocess.run(
+                ["bash", "-c", 'source ./firmae.config && "$@"', "_", name] + [str(a) for a in args],
+                cwd=self.cfg.root, env=self.cfg.env(), stdout=subprocess.DEVNULL,
+                timeout=RELEASE_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:
+            self.say.error("%s timed out after %ds" % (name, RELEASE_TIMEOUT))
+            return int(ExitCode.TIMEOUT)
 
     def _capture(self, argv):
         """Run a helper script, return its stdout; stderr goes to the terminal."""
-        res = subprocess.run(argv, cwd=self.cfg.root, env=self.cfg.env(),
-                             stdout=subprocess.PIPE)
+        try:
+            res = subprocess.run(argv, cwd=self.cfg.root, env=self.cfg.env(),
+                                 stdout=subprocess.PIPE, timeout=CAPTURE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise FirmAEError("helper", ExitCode.TIMEOUT,
+                              "%s timed out after %ds" % (os.path.basename(argv[0]), CAPTURE_TIMEOUT))
         return res.returncode, res.stdout.decode(errors="replace").strip()
 
     def _extract(self, flag, infile, brand_args):
@@ -126,7 +137,7 @@ class Pipeline:
         self._extract("-nk", infile, brand_args)
 
         _, iid = self._capture(["./scripts/util.py", "get_iid", infile, cfg.PSQL_IP])
-        if not iid.isdigit():
+        if not (iid.isascii() and iid.isdigit()):    # str.isdigit() also accepts e.g. "²"
             raise FirmAEError("extract", ExitCode.IMAGE_ID, "extractor.py failed!")
         self.iid = iid
 

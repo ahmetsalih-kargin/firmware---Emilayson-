@@ -24,20 +24,29 @@ def ParseCmd():
         out.close()
 
 
+def kernel_strings(path):
+    """Lines of `strings <path>`, without a shell."""
+    out = subprocess.run(["strings", path], stdout=subprocess.PIPE, check=True)
+    return out.stdout.decode(errors="replace").splitlines()
+
+
 if __name__ == "__main__":
     # execute only if run as a script
     IID = sys.argv[1]
+    if not (IID.isascii() and IID.isdigit()):
+        sys.exit("usage: inferKernel.py <numeric image id>")
     kernelPath = "./images/" + IID + ".kernel"
-    os.system(
-        'strings {} | grep "Linux version" > {}'.format(
-            kernelPath, "scratch/" + IID + "/kernelVersion"
-        )
-    )
+    lines = kernel_strings(kernelPath)
 
-    os.system(
-        "strings {} | grep \"init=/\" | sed -e 's/^\"//' -e 's/\"$//' > {}".format(
-            kernelPath, "scratch/" + IID + "/kernelCmd"
-        )
-    )
+    # was: strings K | grep "Linux version" > scratch/IID/kernelVersion
+    with open("scratch/" + IID + "/kernelVersion", "w") as f:
+        f.writelines(l + "\n" for l in lines if "Linux version" in l)
+
+    # was: strings K | grep "init=/" | sed -e 's/^"//' -e 's/"$//' > scratch/IID/kernelCmd
+    def unquote(line):
+        line = line[1:] if line.startswith('"') else line
+        return line[:-1] if line.endswith('"') else line
+    with open("scratch/" + IID + "/kernelCmd", "w") as f:
+        f.writelines(unquote(l) + "\n" for l in lines if "init=/" in l)
 
     ParseCmd()

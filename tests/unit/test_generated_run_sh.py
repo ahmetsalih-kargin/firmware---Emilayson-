@@ -25,7 +25,7 @@ while true; do sleep 0.1; done
 
 
 @pytest.fixture
-def world(repo_root, tmp_path, firmae_env):
+def world(repo_root, tmp_path, firmae_env, iptables_stubs):
     root = tmp_path / "FirmAE"
     (root / "scratch" / "1" / "image" / "firmadyne").mkdir(parents=True)
     log = tmp_path / "log"
@@ -56,8 +56,9 @@ def world(repo_root, tmp_path, firmae_env):
     run_sh.write_text(script)
     run_sh.chmod(0o755)
 
-    env = dict(os.environ, LOG=str(log), PATH="%s:%s" % (bindir, os.environ["PATH"]),
-               USER=os.environ.get("USER", "root"))
+    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]),
+               USER=os.environ.get("USER", "root"),
+               **iptables_stubs(bindir, log, tmp_path / "rules"))      # sets LOG and IPT_STATE
     env.pop("FIRMAE_DOCKER", None)
 
     def start(**extra):
@@ -65,8 +66,10 @@ def world(repo_root, tmp_path, firmae_env):
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, start_new_session=True)
 
-    def calls():
-        return log.read_text().splitlines() if log.exists() else []
+    def calls(firewall=False):
+        """Logged commands; the firewall ones only when asked (they have their own test)."""
+        lines = log.read_text().splitlines() if log.exists() else []
+        return [l for l in lines if firewall or not l.startswith(("iptables ", "ip6tables "))]
     return start, calls
 
 
@@ -126,6 +129,22 @@ def test_interrupt_stops_qemu_and_cleans_up(world, how, expected_rc):
     assert gone(q)
 
 
+@pytest.mark.parametrize("how", ["normal", "sigterm"])
+def test_isolation_is_in_place_while_qemu_runs_and_gone_afterwards(world, how):
+    start, calls = world
+    p = start(QEMU_EXIT_AFTER="1") if how == "normal" else start()
+    if how == "sigterm":
+        wait_for(calls, "qemu start")
+        p.send_signal(signal.SIGTERM)
+    p.communicate(timeout=60)
+    log = calls(firewall=True)
+    first_fw = next(i for i, c in enumerate(log) if c.startswith("iptables -I INPUT"))
+    qemu = next(i for i, c in enumerate(log) if c.startswith("qemu start"))
+    removed = max(i for i, c in enumerate(log) if c.startswith("iptables -D FORWARD"))
+    assert first_fw < qemu < removed
+    assert log.index("tunctl -t tap1_0 -u %s" % os.environ.get("USER", "root")) < first_fw
+
+
 def test_start_net_failure_still_removes_what_was_created(world):
     start, calls = world
     p = start(FAIL_TUNCTL="1")
@@ -134,6 +153,7 @@ def test_start_net_failure_still_removes_what_was_created(world):
     c = calls()
     assert not any(x.startswith("qemu start") for x in c)
     assert "tunctl -d tap1_0" in c               # was skipped before: set -e exited first
+    assert not any(x.startswith("qemu start") for x in calls(firewall=True))
 
 
 def test_image_preparation_failure_releases_the_loop_device(world):

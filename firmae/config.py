@@ -39,6 +39,8 @@ class Config:
         """Environment for child processes (what firmae.config exported to them)."""
         e = dict(os.environ)
         e.update(TIMEOUT=str(self.TIMEOUT), FIRMAE_NET=self.FIRMAE_NET)
+        # psycopg2 (libpq) honours this: an unreachable database no longer hangs a stage forever
+        e.setdefault("PGCONNECT_TIMEOUT", "30")
         return e
 
 

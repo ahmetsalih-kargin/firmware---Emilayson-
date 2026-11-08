@@ -47,7 +47,11 @@ def run_with_timeout(argv, timeout, grace=15, timeout_signal=signal.SIGINT, **po
     proc = subprocess.Popen(argv, start_new_session=True, **popen_kwargs)
     try:
         try:
-            return proc.wait(timeout=timeout), False
+            rc = proc.wait(timeout=timeout)
+            # a stage that exits normally must not leave helpers behind (an
+            # orphaned QEMU holds image.raw locked); nothing to do if the group is empty
+            _signal_group(proc.pid, signal.SIGKILL)
+            return rc, False
         except subprocess.TimeoutExpired:
             stop_group(proc, timeout_signal, grace)
             return proc.returncode, True

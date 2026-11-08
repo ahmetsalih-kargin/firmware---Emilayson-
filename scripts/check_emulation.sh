@@ -52,7 +52,7 @@ else
   done
 fi
 
-echo "[*] Waiting web service... from ${IPS[@]}: terminating after ${CHECK_TIMEOUT} secs..."
+echo "[*] Waiting web service... from ${IPS[*]}: terminating after ${CHECK_TIMEOUT} secs..."
 read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_network "${IPS[@]}" false)
 
 if [ "${PING_RESULT}" = "true" ]; then

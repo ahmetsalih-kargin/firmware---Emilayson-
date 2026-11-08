@@ -240,7 +240,7 @@ class ExtractionItem(object):
             import psycopg2
             self.database = psycopg2.connect(database="firmware",
                                              user="firmadyne",
-                                             password="firmadyne",
+                                             password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
                                              host=self.extractor.database)
 
         # Checksum
@@ -354,16 +354,25 @@ class ExtractionItem(object):
 
         return self.get_status()
 
+    UPDATABLE_FIELDS = ("kernel_extracted", "rootfs_extracted", "kernel_version")
+
     def update_database(self, field, value):
         """
         Update a given field in the database.
+
+        `value` can come from the firmware (kernel_version is binwalk's
+        description of the image), so it is passed as a parameter; the column
+        name is checked against a fixed list (SECURITY.md S14).
         """
+        if field not in self.UPDATABLE_FIELDS:
+            raise ValueError("invalid image field: %r" % (field, ))
         ret = True
+        cur = None
         if self.database:
             try:
                 cur = self.database.cursor()
-                cur.execute("UPDATE image SET " + field + "='" + value +
-                            "' WHERE id=%s", (self.tag, ))
+                cur.execute("UPDATE image SET " + field + "=%s WHERE id=%s",
+                            (value, self.tag))
                 self.database.commit()
             except BaseException:
                 ret = False
@@ -739,7 +748,7 @@ def psql_check(psql_ip):
         import psycopg2
         psycopg2.connect(database="firmware",
                          user="firmadyne",
-                         password="firmadyne",
+                         password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
                          host=psql_ip)
 
         return True
