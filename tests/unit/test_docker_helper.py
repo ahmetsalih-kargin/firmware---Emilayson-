@@ -79,3 +79,121 @@ def test_run_command_and_script(dh):
     assert calls == [["docker", "exec", "core1", "bash", "-c", "ls; id"],
                      ["docker", "cp", "some/dir/x.sh", "core1:/"],
                      ["docker", "exec", "core1", "/x.sh"]]
+
+
+# ---------------------------------------------------------- hardening fixes
+
+import os  # noqa: E402
+import time  # noqa: E402
+
+import pytest  # noqa: E402,F811
+
+
+def _mod(helper):
+    return type(helper).__init__.__globals__
+
+
+def test_waits_for_iid_instead_of_giving_up_on_first_empty_answer(dh, monkeypatch):
+    helper, calls, root = dh
+    mod = _mod(helper)
+    answers = iter([""] * 20 + [5])
+    n = []
+    monkeypatch.setattr(mod["util"], "get_iid", lambda p, ip: (n.append(1), next(answers))[1])
+    (root / "images").mkdir()
+    (root / "images" / "5.tar.gz").write_text("x")
+    seen = {}
+
+    def fake_check(firmware, name, brand, iid, is_emulation=True, since=None):
+        seen["since"] = since
+        return True
+    monkeypatch.setattr(helper, "check_result", fake_check)
+    helper.run_core(0, "-c", "b", "/fw/x.bin", "docker0_x")
+    assert len(n) == 21 and isinstance(seen["since"], float)
+
+
+def test_iid_never_appearing_is_a_failure_and_db_errors_are_retried(dh, monkeypatch):
+    helper, calls, root = dh
+    mod = _mod(helper)
+
+    def boom(p, ip):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(mod["util"], "get_iid", boom)
+    helper.IID_WAIT_SECONDS = 5
+    assert helper._run_core(0, "-c", "b", "/fw/x.bin", "docker0_x") == ("docker0_x", False)
+
+
+def test_check_result_ignores_stale_result_file(dh):
+    helper, _, root = dh
+    d = root / "scratch" / "7"
+    d.mkdir()
+    res = d / "result"
+    res.write_text("true")
+    os.utime(res, (1000, 1000))
+    assert helper.check_result("fw", "d", "b", 7, True, since=time.time()) is False
+    os.utime(res, None)
+    assert helper.check_result("fw", "d", "b", 7, True, since=time.time() - 5) is True
+    res.write_text("false")
+    assert helper.check_result("fw", "d", "b", 7, True, since=time.time() - 5) is False
+
+
+def test_parse_firmware_list_skips_bad_lines(dh):
+    mod = _mod(dh[0])
+    out = mod["parse_firmware_list"](["asus,/a/x.bin", "", "garbage", ",/p", "b,", "c,/d,ir/y.bin"])
+    assert out == [["asus", "/a/x.bin"], ["c", "/d,ir/y.bin"]]
+
+
+def test_runner_reports_failure_and_always_stops_container(dh, monkeypatch, tmp_path):
+    helper, calls, root = dh
+    mod = _mod(helper)
+    fw = tmp_path / "x.bin"
+    fw.write_text("x")
+    stopped = []
+    monkeypatch.setattr(helper, "stop_core", lambda n: stopped.append(n))
+
+    def explode(*a):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(helper, "_run_core", explode)
+    assert mod["runner"]((0, helper, "-c", "b", str(fw))) is False
+    assert stopped == ["docker0_x.bin"]
+    monkeypatch.setattr(helper, "_run_core", lambda *a: ("n", True))
+    assert mod["runner"]((0, helper, "-c", "b", str(fw))) is True
+    assert mod["runner"]((0, helper, "-c", "b", str(tmp_path / "missing"))) is False
+
+
+def test_batch_exits_nonzero_when_a_firmware_fails(dh, monkeypatch, tmp_path):
+    helper, calls, root = dh
+    mod = _mod(helper)
+    fw = tmp_path / "x.bin"
+    fw.write_text("x")
+    lst = tmp_path / "fw.list"
+    lst.write_text("b,%s\nbad line\n\nb,%s\n" % (fw, tmp_path / "nothere"))
+
+    class Res:
+        def __init__(self, v):
+            self.v = v
+
+        def get(self):
+            return self.v
+
+    class Pool:
+        def __init__(self, n):
+            pass
+
+        def apply_async(self, fn, args):
+            return Res(fn(*args))
+
+        def close(self):
+            pass
+
+        def join(self):
+            pass
+    monkeypatch.setattr(mod["mp"], "Pool", Pool)
+    monkeypatch.setattr(mod["docker_helper"], "_run_core", lambda *a: ("n", True))
+    monkeypatch.setattr(mod["docker_helper"], "stop_core", lambda self, n: b"")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(mod["sys"], "argv", ["docker-helper.py", "-ec", "b", str(lst)])
+    with pytest.raises(SystemExit) as e:
+        mod["main"]()
+    assert e.value.code == 1                       # the missing firmware failed
+    lst.write_text("b,%s\n" % fw)
+    mod["main"]()                                  # all good: returns normally

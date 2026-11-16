@@ -47,6 +47,15 @@ class docker_helper:
         return sp.check_output(["docker", "stop", container_name])
 
     def run_core(self, idx, mode, brand, firmware_path, docker_name):
+        return self._run_core(idx, mode, brand, firmware_path, docker_name)[0]
+
+    # How long to wait for the extractor to register the image in the database
+    IID_WAIT_SECONDS = 300
+
+    def _run_core(self, idx, mode, brand, firmware_path, docker_name):
+        """Returns (docker_name, ok). ok is False when the pipeline itself
+        failed (container, database, extraction); a firmware that simply does
+        not emulate is a normal result and still ok."""
         firmware_root = os.path.dirname(firmware_path)
         firmware = os.path.basename(firmware_path)
         env_args = ["-e", "FIRMAE_DB_PASSWORD"] if "FIRMAE_DB_PASSWORD" in os.environ else []
@@ -77,22 +86,33 @@ class docker_helper:
             sp.call(["docker", "exec", "-it", docker_name, "bash"])
 
         if mode in ["-r", "-d"]:
-            return docker_name
+            return docker_name, True
 
         time.sleep(10)
-        while iid == -1:
+        # the extractor registers the image in the database; wait for it
+        iid = ""
+        for _ in range(self.IID_WAIT_SECONDS):
             time.sleep(1)
-            iid = util.get_iid(firmware_path, "127.0.0.1")
-            with open(firmware_log) as f:
-                f.readline()
-                last_line = f.readline()
-                if last_line.find("container failed") != -1:
-                    logging.error("[-] %s container failed to connect to the hosts' postgresql", docker_name)
-                    return docker_name
+            try:
+                iid = util.get_iid(firmware_path, "127.0.0.1")
+            except Exception as e:
+                logging.debug("[*] %s get_iid: %s", docker_name, e)
+                iid = ""
+            if iid:
+                break
+            try:
+                with open(firmware_log) as f:
+                    f.readline()
+                    last_line = f.readline()
+            except OSError:
+                last_line = ""
+            if last_line.find("container failed") != -1:
+                logging.error("[-] %s container failed to connect to the hosts' postgresql", docker_name)
+                return docker_name, False
 
         if not iid:
             logging.error("[-] %s getting iid failed.", docker_name)
-            return docker_name
+            return docker_name, False
 
         # check success of extractor
         tgz_path = os.path.join(self.firmae_root, "images", str(iid) + ".tar.gz")
@@ -102,10 +122,10 @@ class docker_helper:
                 break
         else:
             logging.error("[-] %s extraction failed.", docker_name)
-            return docker_name
+            return docker_name, False
 
         # check
-        emulation_result = self.check_result(firmware, docker_name, brand, iid, True)
+        emulation_result = self.check_result(firmware, docker_name, brand, iid, True, since=t0)
         time_elapsed = time.time() - t0
 
         work_dir = os.path.join(self.firmae_root, "scratch", str(iid))
@@ -131,7 +151,7 @@ class docker_helper:
             # analyses
             if mode == "-a":
                 t1 = time.time()
-                analyses_result = self.check_result(firmware, docker_name, brand, iid, False)
+                analyses_result = self.check_result(firmware, docker_name, brand, iid, False, since=t0)
                 time_elapsed = time.time() - t1
 
                 if analyses_result:
@@ -142,7 +162,7 @@ class docker_helper:
         else:
             logging.error("[-] %s (%d) emulation failed. (%0.4fs)", docker_name, iid, time_elapsed)
 
-        return docker_name
+        return docker_name, True
 
     def run_command(self, core, cmd):
         """Run the user's own command string in a container (`-c` mode)."""
@@ -166,7 +186,9 @@ class docker_helper:
 
         return result
 
-    def check_result(self, firmware, docker_name, brand, iid, is_emulation=True):
+    def check_result(self, firmware, docker_name, brand, iid, is_emulation=True, since=None):
+        """Wait for the result file. With `since` (epoch seconds), a result
+        file older than that belongs to a previous run and is ignored."""
         time.sleep(10) # wait until re-run
         if is_emulation:
             result_path = "{}/scratch/{}/result".format(self.firmae_root, iid)
@@ -178,15 +200,14 @@ class docker_helper:
         for i in range(timeout):
             time.sleep(1)
 
-            if not os.path.exists(result_path):
+            try:
+                if since is not None and os.path.getmtime(result_path) < since:
+                    continue
+                with open(result_path) as f:
+                    result = f.read().strip()
+            except OSError:
                 continue
-
-            with open(result_path) as f:
-                result = f.read().strip()
-                if result == "true":
-                    return True
-                else:
-                    return False
+            return result == "true"
 
         return False
 
@@ -206,18 +227,39 @@ def print_usage(argv0):
     return
 
 def runner(args):
+    """Run one firmware. Returns True on success, False on failure; it does
+    not raise for ordinary errors so a pool worker can report the result."""
     (idx, dh, mode, brand, firmware_path) = args
-    if os.path.isfile(firmware_path):
-        firmware = os.path.basename(firmware_path)
-        docker_name = 'docker{}_{}'.format(idx, firmware)
+    if not os.path.isfile(firmware_path):
+        logging.error("[-] Can't find firmware file: %s", firmware_path)
+        return False
+
+    firmware = os.path.basename(firmware_path)
+    docker_name = 'docker{}_{}'.format(idx, firmware)
+    ok = False
+    try:
+        ok = dh._run_core(idx, mode, brand, firmware_path, docker_name)[1]
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        # also runs on Ctrl-C so the container is not left behind
         try:
-            dh.run_core(idx, mode, brand, firmware_path, docker_name)
-        except:
-            import traceback
-            traceback.print_exc()
-        dh.stop_core(docker_name)
-    else:
-        logging.error("[-] Can't find firmware file")
+            dh.stop_core(docker_name)
+        except (sp.CalledProcessError, OSError) as e:
+            logging.warning("[-] %s: could not stop container: %s", docker_name, e)
+    return ok
+
+def parse_firmware_list(lines):
+    """Parse `brand,path` lines of a .list file; bad lines are skipped."""
+    firmwares = []
+    for no, line in enumerate(lines, 1):
+        brand, sep, path = line.partition(',')
+        if not sep or not brand.strip() or not path.strip():
+            logging.warning("[-] list line %d skipped (expected 'brand,path'): %r", no, line)
+            continue
+        firmwares.append([brand, path])
+    return firmwares
 
 def main():
     if len(sys.argv) < 2:
@@ -240,7 +282,8 @@ def main():
         firmware_path = os.path.abspath(sys.argv[3])
         if os.path.isfile(firmware_path) and not firmware_path.endswith('.list'):
             argv = (0, dh, mode, brand, firmware_path)
-            runner(argv)
+            if not runner(argv):
+                exit(1)
 
         elif os.path.isfile(firmware_path) and firmware_path.endswith('.list') \
             or os.path.isdir(firmware_path):
@@ -256,7 +299,11 @@ def main():
                 # this accepts firmware list file
                 with open(firmware_path, 'r') as f:
                     firmwares = f.read().splitlines()
-                firmwares = list(map(lambda x: x.split(','), firmwares))
+                firmwares = parse_firmware_list(firmwares)
+
+            if not firmwares:
+                logging.error("[-] No firmware to process")
+                exit(1)
 
             num_cores = mp.cpu_count()
             if len(firmwares) < num_cores:
@@ -266,16 +313,31 @@ def main():
             t0 = time.time()
 
             p = mp.Pool(num_cores)
+            results = []
             for idx, firmware in enumerate(firmwares):
                 brand, firmware = firmware
                 arg=(idx, dh, mode, brand, firmware)
-                p.apply_async(runner, args=(arg,))
+                results.append((firmware, p.apply_async(runner, args=(arg,))))
                 time.sleep(1)
             p.close()
             p.join()
 
+            failed = []
+            for firmware, res in results:
+                try:
+                    ok = res.get()
+                except Exception as e:
+                    logging.error("[-] %s: worker error: %s", firmware, e)
+                    ok = False
+                if not ok:
+                    failed.append(firmware)
+
             logging.info("[*] Processing %d firmware done. (%0.4fs)",
                          len(firmwares), time.time() - t0)
+            if failed:
+                logging.error("[-] %d of %d firmware failed: %s",
+                              len(failed), len(firmwares), ", ".join(failed))
+                exit(1)
 
     elif sys.argv[1] in ['-er', '-ed']:
         if len(sys.argv) < 3:
@@ -286,7 +348,8 @@ def main():
         firmware_path = os.path.abspath(sys.argv[2])
         if os.path.isfile(firmware_path):
             argv = (0, dh, mode, "auto", firmware_path)
-            runner(argv)
+            if not runner(argv):
+                exit(1)
 
     elif sys.argv[1] == '-c':
         if len(sys.argv) != 3:
