@@ -11,6 +11,8 @@ import hashlib
 import multiprocessing
 import os
 import shutil
+import signal
+import sys
 import tempfile
 import traceback
 import pathlib
@@ -436,12 +438,35 @@ class ExtractionItem(object):
         if self._check_blacklist():
             return self.get_status()
 
+        try:
+            prev_cwd = os.getcwd()
+        except OSError:
+            prev_cwd = None
+
         # create working directory
         self.temp = tempfile.mkdtemp()
 
-        # Move to temporary directory so binwalk does not write to input
-        os.chdir(self.temp)
+        try:
+            # Move to temporary directory so binwalk does not write to input
+            os.chdir(self.temp)
+            return self._extract_in_temp()
+        finally:
+            # Always leave the temp dir and delete it (also on SIGINT/SIGTERM
+            # turned into exceptions, or on any error).
+            if prev_cwd:
+                try:
+                    os.chdir(prev_cwd)
+                except OSError:
+                    pass
+            self.printf(">> Cleaning up %s..." % self.temp)
+            Extractor.io_rm(self.temp)
+            self.temp = None
 
+    def _extract_in_temp(self):
+        """
+        Run binwalk on the item inside self.temp. Returns True if extraction
+        is complete, otherwise False.
+        """
         try:
             self.printf(">> Tag: %s" % self.tag)
             self.printf(">> Temp: %s" % self.temp)
@@ -746,15 +771,21 @@ class ExtractionItem(object):
 def psql_check(psql_ip):
     try:
         import psycopg2
-        psycopg2.connect(database="firmware",
-                         user="firmadyne",
-                         password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
-                         host=psql_ip)
-
+        conn = psycopg2.connect(database="firmware",
+                                user="firmadyne",
+                                password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
+                                host=psql_ip)
+        conn.close()
         return True
 
-    except:
+    except Exception as e:
+        print("[-] Cannot connect to the PostgreSQL server (%s): %s" %
+              (psql_ip, str(e).strip() or type(e).__name__), file=sys.stderr)
         return False
+
+def _terminate(signum, frame):
+    """Turn SIGTERM into an exception so cleanup (finally) blocks run."""
+    raise SystemExit(128 + signum)
 
 def main():
     parser = argparse.ArgumentParser(description="Extracts filesystem and \
@@ -788,11 +819,15 @@ def main():
         print("[*] Input : %s" % arg.input)
         print("[*] Output: %s" % arg.output)
 
-    if arg.debug or psql_check(arg.sql):
-        extract = Extractor(arg.input,  arg.output,   arg.rootfs,
-                            arg.kernel, arg.parallel, arg.sql,
-                            arg.brand,  arg.debug)
-        extract.extract()
+    if not (arg.debug or psql_check(arg.sql)):
+        return 1
+
+    signal.signal(signal.SIGTERM, _terminate)
+    extract = Extractor(arg.input,  arg.output,   arg.rootfs,
+                        arg.kernel, arg.parallel, arg.sql,
+                        arg.brand,  arg.debug)
+    extract.extract()
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
