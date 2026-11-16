@@ -462,3 +462,68 @@ mesajına ve udev davranışına dayanıyor, ölçülmüş bir kanıtı yok; B, 
 
 **Bu denetimde de test edilemeyenler:** analiz/debug/run/boot modları, Docker modu, DHCP (`-netdev user`) final
 emülasyonu, iki aynı mimari firmware'in paralel çalıştırılması, uzun süreli (saatlerce) çalışma.
+
+
+---
+
+## İkinci sağlamlaştırma turu ve bağımsız denetim (2026-11-16)
+
+> Bu bölüm önceki bölümlerin sayılarına dokunmaz (onlar tarihsel kayıttır). Değişiklikler:
+> `CHANGELOG.md` "Second hardening pass"; bulgular: `SECURITY.md` S19-S25. Kod henüz
+> commit edilmedi (`git status`).
+
+**Yöntem.** İki tur: her turda paralel çalışan geliştirici ajanlar (toplam yedi) ayrı dosya
+kümelerini düzeltti ve test yazdı; ayrıca sıfır bağlamlı bağımsız bir denetçi hem kodu hem
+belgeleri inceledi. Denetçi mutasyon yöntemiyle (düzeltmeyi bozup testin kırılmasına
+bakarak) düzeltmelerin testlerle korunduğunu doğruladı. Gerçek emülasyon son turda
+(`results/20261116-181217`) yapıldı.
+
+### Birim testleri
+
+WSL Ubuntu 24.04, Python 3.12, root değil: **428 geçti, 0 başarısız** (önceki: 181). Bu
+belgeyi yazarken tüm takım yeniden koşuldu: `python3 -m pytest -q -p no:cacheprovider` →
+428 passed (uyarısız). `-X dev -W error::ResourceWarning` ile `test_debug_py.py` +
+`test_locking.py` 16 test, uyarısız. Yeni test dosyaları: `test_compare_py.py`,
+`test_debug_py.py`, `test_extractor.py`, `test_fuzzer_robustness.py`, `test_inferdefault.py`,
+`test_locking.py`, `test_makenetwork_security.py`, `test_review_fixes_core.py`,
+`test_review_fixes_scripts.py`, `test_tar2db.py`, `test_util_py.py`.
+
+### Gerçek emülasyon (son tur)
+
+| Senaryo | Sonuç |
+|---|---|
+| **A** ARM DIR-868L | exit 0, 406 sn, `result` = true; ilgisiz `qemu-system-arm` süreci hayatta kaldı |
+| **B** MIPS WNAP320 | exit 0, 381 sn; ilgisiz `qemu-system-mipsel` hayatta kaldı |
+| **F** iki bozuk girdi | exit 10 (ikisi de) |
+| **H** son emülasyonda Ctrl-C | öncesinde TAP=2, QEMU=1, güvenlik duvarı kuralı=4, `/tmp` soketi=2; 30 sn sonra hepsi 0 |
+| **C** ilk emülasyonda Ctrl-C | 30 sn sonra TAP/QEMU/kural/soket hepsi 0 |
+| **G** C'den sonra sıfırlamadan tekrar | exit 0, 386 sn (Faz 3'te bu senaryo `Failed to get "write" lock` ile düşüyordu) |
+
+**Karşılaştırma:** A ve B çıktıları ile üretilen `run.sh` bir önceki turla birebir aynı; tek
+fark (önceki commit'e göre) şablondaki 16 satırlık denetim bloğu
+(`tests/fixtures/generated/run_sh_*.expected`). `tar2db.py` gerçek PostgreSQL'de hatasız
+çalıştı.
+
+### Denetçinin belge-kod çelişkileri ve kapatılması
+
+| Bulgu | Kapatılma |
+|---|---|
+| `SECURITY.md` S19 ve `CHANGELOG.md` `util/compare.py`'yi "açık" gösteriyor | Düzeltildi; S19 "giderildi" (kabuksuz yeniden yazım) |
+| `ARCHITECTURE.md` kilidi `scratch/IID/run/lock` ve `scratch/.slots/` diye anlatıyor | Gerçek: `scratch/<IID>/.firmae.lock` ve `scratch/.locks/<md5>.lock`, slot yok; belge düzeltildi |
+| `ARCHITECTURE.md` "-pidfile" diyor | Kodda yok; "uygulanmadı" diye işaretlendi |
+| `ARCHITECTURE.md` "hiçbiri uygulanmadı" / "15 fonksiyon" | `firmae/` paketi var; `firmae.config` 29 fonksiyon içeriyor; düzeltildi |
+| `REFACTORING_PLAN.md` ve bu raporun Faz 4 bölümü "kilitler yok" | Plan tablosu güncellendi; bu rapordaki eski cümle tarihsel kayıt olarak bırakıldı (bu bölüm düzeltir) |
+| `ip6tables` yoksa IPv6 sessizce yalıtılmıyor | `SECURITY.md` kalan riskler bölümüne eklendi (kod değişmedi) |
+
+### Test edilmeyenler / kalan riskler
+
+- DHCP modu, analiz modu (`-a`), debug/run/boot modları, Docker modu ve `install.sh` gerçek
+  çalıştırmayla doğrulanmadı.
+- `makeImage.sh`'in FIFO/symlink (`/bin/a`) yolu yalnızca sahte ağaçta denendi.
+- `findPorts` gerçek 4.1 çekirdek log biçimini tanımıyor (bilinen, bilerek bekletildi).
+- TAP adları ve iptables etiketi host genelinde tek ad alanı: aynı IID'li iki kurulum çakışır.
+- `scratch/.locks/*.lock` dosyaları birikir; `get_scratch` hâlâ global `IID` kullanıyor.
+- Açık bulgular S7, S9, S10, S11, S15, S16; Faz 6 (peripheral) ve Faz 7 (bağımlılık/kurulum)
+  hiç başlanmadı.
+- Eşzamanlı çalıştırma kilidi birim testlerle (gerçek `flock` tutan ayrı süreç) denendi;
+  iki gerçek emülasyonun aynı anda koşturulması doğrulanmadı.

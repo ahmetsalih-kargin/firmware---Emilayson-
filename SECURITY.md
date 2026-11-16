@@ -4,14 +4,15 @@
 > Hiçbir yazılım için mutlak güvenlik garantisi verilemez; bu belge tespit edilen riskleri,
 > uygulanan/önerilen önlemleri ve kalan riskleri listeler.
 >
-> **Durum özeti (2026-11-08, yerel `refactor/hardening` dalı; Faz 5 kalanı ve denetim düzeltmeleri
-> commit edilmemiş olabilir — `git status`).** Ayrıntılı ölçümler: `TEST_REPORT.md`.
+> **Durum özeti (2026-11-16, yerel `refactor/hardening` dalı; ikinci sağlamlaştırma turu
+> commit edilmemiş — `git status`).** Ayrıntılı ölçümler: `TEST_REPORT.md`; değişiklikler:
+> `CHANGELOG.md`. Bu tur: iki turlu geliştirme + sıfır bağlamlı bağımsız denetim; birim test 181 → 428.
 
 | Durum | Bulgular |
 |---|---|
-| **Giderildi** | S1, S2, S3, S4 (yalnızca yeni kurulumlar; mevcut kurulumda `pg_hba.conf` elle), S5, S6, S12, S13, S14 (extractor + getArch), S17, S18 (kaynak; hazır `console.*` ikilileri yeniden derlenmedi) |
-| **Kısmen** | S8: ilk emülasyonda `restrict=on`, `hostfwd`/soketler loopback'te, TAP modunda iptables kuralları; **DHCP modu hiç çalıştırılmadı**, L2 (ARP) kapsam dışı |
-| **Açık** | S7 (`--privileged`), S9 (çıkarım root + sandbox'sız), S10 (debug shell), S11 (root Chrome `--no-sandbox`), S15 (indirmelerde checksum yok), S16 (eski bağımlılıklar), **S19 (yeni, aşağıda)** |
+| **Giderildi** | S1, S2, S3, S4 (yalnızca yeni kurulumlar; mevcut kurulumda `pg_hba.conf` elle), S5, S6, S12, S13, S14 (extractor + getArch), S17, S18 (kaynak; hazır `console.*` ikilileri yeniden derlenmedi), **S19, S20, S21, S22, S23, S24, S25** (ikinci tur) |
+| **Kısmen** | S8: ilk emülasyonda `restrict=on`, `hostfwd`/soketler loopback'te, TAP modunda iptables/ip6tables kuralları; **DHCP modu hiç çalıştırılmadı**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
+| **Açık** | S7 (`--privileged`), S9 (çıkarım root + sandbox'sız), S10 (debug shell), S11 (root Chrome `--no-sandbox`), S15 (indirmelerde checksum yok), S16 (eski bağımlılıklar) |
 
 ## 1. Tehdit modeli
 
@@ -49,7 +50,13 @@ firmware kaynaklı saldırılar P0 olarak kalır.
 | S16 | P2 | Bilinen zafiyet kaydı olan bağımlılıklar (aşağıda) ve `ubuntu:20.04` Docker tabanı | `requirements.txt`, `core/Dockerfile:1` | Kontrollü yükseltme (Faz 7) |
 | S17 | P3 | `debug.py` `os.system` + etkileşimli kullanıcı girdisi | `debug.py:86,92` | Argüman listesi |
 | S18 | P3 | `console.c:17` operatör önceliği hatası (tesadüfen çalışıyor) | `sources/console/console.c:17` | Parantez düzeltmesi (binary yeniden derlenmeli) |
-| S19 | **P1** (yeni, denetimde bulundu) | `util/compare.py` (değerlendirme aracı): firmware ağacındaki dosya adları `os.system("cp " + filepath + ...)` ile komuta yapışıyor (S1 ile aynı sınıf komut enjeksiyonu); içe aktarılınca çalışıyor; `loop0` sabit kodlu ve sonda `losetup -d /dev/loop0` **başkasının loop device'ını çözebilir** | `util/compare.py:38-139` | **Açık.** Ana akışta kullanılmıyor. Güvenilmeyen firmware üzerinde çalıştırmayın; yeniden yazılması gerekiyor |
+| S19 | **P1** (denetimde bulundu) | `util/compare.py` (değerlendirme aracı): firmware ağacındaki dosya adları `os.system("cp " + filepath + ...)` ile komuta yapışıyordu (S1 ile aynı sınıf komut enjeksiyonu); `loop0` sabit kodluydu ve sonda `losetup -d /dev/loop0` **başkasının loop device'ını çözebilirdi** | `util/compare.py` (`attach_loop` satır 122; mount satır 210) | **Giderildi (ikinci tur).** Kabuksuz yeniden yazıldı, symlink izlenmez, yalnızca kendi loop aygıtını çözer, `ro,nodev,nosuid,noexec` mount. Testler: `tests/unit/test_compare_py.py`. Ana akışta zaten kullanılmıyordu |
+| S20 | **P0** (ikinci turda bulundu) | Misafirin seri logundan okunan arayüz/köprü adları, VLAN kimlikleri, IP/MAC değerleri doğrulanmadan üretilen **root** script'ine (`scratch/<IID>/run.sh`) giriyordu → firmware kaynaklı komut enjeksiyonu | `scripts/makeNetwork.py` (`IFNAME_RE`/`MAC_RE`/`IPV4_RE` satır 37-40, `checkQemuCmdInputs` satır 745) | **Giderildi.** Ayrıştırmada katı desenler (`\Z`: sondaki satır sonu reddedilir), üretimden önce `checkQemuCmdInputs` ile ikinci denetim, `re.escape`, aşırı uzun sayı satırı atlatır. Testler: `tests/unit/test_makenetwork_security.py` |
+| S21 | P1 (ikinci turda bulundu) | İmaja yazma yolları (init betiği, `network_type`, `net_bridge`, `net_interface`, `debug.sh`) çalışma sonrası misafirin bıraktığı symlink/FIFO/aygıt dosyasını izleyerek **host'a root olarak yazabiliyordu** (S5'in çalışma-zamanı karşılığı) | `scripts/makeNetwork.py` (`firmadyneFile` 139, `openImageFile` 149, mount 325-328), üretilen `run.sh` şablonundaki 16 satırlık denetim bloğu, `firmae.config` `mount_partition` (~372) | **Giderildi.** Symlink/normal-olmayan dosya reddi (`O_NOFOLLOW` + `lstat`); mount `nodev,nosuid`; init betiği bayt bayt geri yazılır |
+| S22 | P1 (ikinci turda bulundu) | `inferDefault.py` imajdaki symlink'i izleyip host dosyalarını (ör. `/proc/kcore`) okuyabiliyor; `nvram_files` kopyası symlink izliyordu | `scripts/inferDefault.py:26-32` (`O_NOFOLLOW`), `:209-217` (güvenli yazma) | **Giderildi.** Symlink/normal olmayan dosya okunmaz, dosya başına 64 MiB sınır, kopya symlink izlemez |
+| S23 | P2 (ikinci turda bulundu) | Misafir kaynaklı kaynak tüketimi: karesel süreli desenler/ayrıştırma, sınırsız seri log, ağ, arayüz ve port sayısı | `scripts/makeNetwork.py:46-53` (sınırlar), `scripts/inferDefault.py:17-22`, `analyses/fuzzer/fwscan.py:39` (`_printable_tail`) | **Giderildi.** Seri log ≤ 64 MB, ≤ 4 ağ, ≤ 64 arayüz kaydı, ≤ 32 ek hostfwd portu (port 0 reddedilir), `inferDefault` ≤ 600 sn, ≤ 10.000 NVRAM anahtarı / 256 bayt; ölçüm: 40k anahtar 7,62 → 0,59 sn, 80 KB yazdırılabilir blok 16,8 sn → doğrusal |
+| S24 | P1 (ikinci turda bulundu) | Temizlik, başka bir kurulumun/kullanıcının QEMU'sunu durdurabiliyordu (ad desenine göre eşleme) | `firmae.config` `qemu_pids` (satır 420) | **Giderildi.** `/proc/<pid>/cmdline` içinde bu kurulumun tam `scratch/<IID>/image.raw` yolu aranır; gerçek çalıştırmada ilgisiz `qemu-system-arm`/`-mipsel` hayatta kaldı |
+| S25 | P2 (ikinci turda bulundu) | Eşzamanlı çalıştırmada kilit yok: aynı firmware/IID iki kez çalışınca birbirinin kaynağını (loop, mount, TAP, QEMU) bozabiliyordu | `firmae/pipeline.py:121` (`scratch/.locks/<md5>.lock`), `:139` (`scratch/<IID>/.firmae.lock`), `firmae/errors.py` (`BUSY = 75`) | **Giderildi.** `flock` ile iki kilit; alınamazsa çıkış 75, hiçbir şeye dokunulmaz. Kalan: `.locks/*.lock` dosyaları birikir |
 
 ## 3. Bağımlılık taraması
 
@@ -77,3 +84,25 @@ selenium. Not: `urllib3 2.2.3` son commit'te (`653565b`) yükseltilmiş olmasın
 - Kernel ve guest binary'leri (busybox, libnvram, console, strace, gdb) bu repodan değil,
   GitHub release'lerinden önceden derlenmiş olarak indiriliyor; kaynakla eşleştikleri
   doğrulanmadı.
+
+**İkinci turdan sonra güncel liste (2026-11-16)** — hepsi kodda/çalıştırmada doğrulanmış
+durumlardır; "doğrulanmadı" yazanlar gerçek çalıştırmayla denenmedi.
+
+- **TAP adları ve iptables etiketi host genelinde tek ad alanı:** `tap<IID>_<n>` ve
+  `firmae:<IID>` etiketi kurulumdan bağımsızdır; aynı IID'li iki ayrı kurulum (farklı
+  klasör) birbirinin arayüzünü/kurallarını bozar. (`firmae.config` `_isolation_rules`.)
+- **IPv6 yalıtımı sessiz düşebilir:** `ip6tables` yoksa yalnızca `iptables` kuralları
+  uygulanır ve uyarı basılmaz; durum yalnızca `scratch/<IID>/isolation` dosyasındaki
+  `applied: ...` satırından anlaşılır (uyarı yalnızca HİÇBİR araç çalışmazsa basılır).
+- **`findPorts` gerçek 4.1 çekirdek log biçimini tanımıyor** (bilinen; DHCP modunda tam port
+  keşfi bilerek bekletildi, bkz. `CHANGELOG.md` 2.10).
+- **Doğrulanmadı (gerçek çalıştırma yok):** DHCP modu, analiz modu (`-a`), debug/run/boot
+  modları, Docker modu, `install.sh`. `makeImage.sh`'in FIFO/symlink (`/bin/a`) yolu yalnızca
+  sahte ağaçta denendi.
+- **`scratch/.locks/*.lock` dosyaları birikir** (silinmez; boş, zararsız).
+- **`get_scratch` hâlâ global `IID` değişkenini kullanıyor** (`firmae.config`, `get_scratch`):
+  argümanı doğrulayıp başka bir değişkeni kullanıyor; çağıranlar IID'yi ayarlamak zorunda.
+- **Açık bulgular:** S7, S9, S10, S11, S15, S16 (yukarıdaki tablo). Peripheral emülasyonu
+  (Faz 6) ve bağımlılık/kurulum (Faz 7) hiç başlanmadı.
+- `analyses_all.sh` `result` dosyasına koşulsuz `true` yazar; adım durumları
+  `analysis_log/steps` içindedir.

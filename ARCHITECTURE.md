@@ -1,8 +1,23 @@
 # FirmAE Mimarisi — Mevcut Durum ve Önerilen Tasarım
 
-> **Durum:** Bu belge bir **tasarım önerisidir** (Aşama 3). "Önerilen" başlıklı bölümlerdeki
-> modüllerin hiçbiri henüz uygulanmadı. "Mevcut" bölümler 2026-11-04 tarihli `master`
-> (`653565b`) üzerindeki koda dayanır.
+> **Durum (2026-11-16 itibarıyla gerçek durum):** Bu belge Aşama 3'te yazılmış bir
+> **tasarım önerisidir**; yalnızca küçük bir kısmı uygulandı. "Mevcut" bölümler 2026-11-04
+> tarihli `master` (`653565b`) üzerindeki koda dayanır ve `refactor/hardening` dalında
+> değişti (aşağıdaki "Gerçek durum" notları).
+>
+> - **Uygulandı:** `firmae/` paketi yalnızca şu modüllerle: `__main__.py`, `config.py`,
+>   `errors.py`, `log.py`, `pipeline.py`, `state.py` (aşama orkestrasyonu, çıkış kodları,
+>   loglama, `scratch/<IID>/*` dosyalarına erişim); `run.sh` ince sarmalayıcıdır;
+>   `scripts/procgroup.py` ile süreç grubu sonlandırma; IID ve firmware kilidi (§6);
+>   aşama zaman aşımları; soketler `scratch/<IID>/run/` altında; `restrict=on`, loopback
+>   `hostfwd`; TAP modunda iptables/ip6tables yalıtımı.
+> - **Hâlâ öneri (uygulanmadı):** `proc.py`, `resources.py` (ResourceStack + journal),
+>   `signals.py`, `storage.py`, `qemu.py`, `network.py`, `metrics.py`, `hwprofile.py`,
+>   `stages/*`; `QemuSpec` tek QEMU oluşturucu; `-pidfile`; `FIRMAE_MAX_PARALLEL` / slot
+>   kilitleri; `systemd-run` kaynak sınırları; `ip netns` yalıtımı; peripheral emülasyonu
+>   (§9); `tests/integration/`. Üretilen `scratch/<IID>/run.sh` hâlâ tam bir Bash
+>   şablonudur (`makeNetwork.py` üretir), tek satırlık Python çağrısı değil.
+> - Güvenlik ve test durumu: `SECURITY.md`, `TEST_REPORT.md`, `CHANGELOG.md`.
 >
 > Kararlar: tek kullanıcılı lab makinesi tehdit modeli, WSL2 (Ubuntu 24.04) test ortamı,
 > hibrit Python geçişi (host tarafı Python, guest tarafı shell).
@@ -12,7 +27,7 @@
 ## 1. Mevcut mimari (özet)
 
 ```
-run.sh ──source──> firmae.config  (ayarlar + 15 Bash fonksiyonu)
+run.sh ──source──> firmae.config  (ayarlar + 29 Bash fonksiyonu)
   ├─ sources/extractor/extractor.py   rootfs/kernel çıkarımı (binwalk, root)
   ├─ scripts/util.py, getArch.py, inferKernel.py, tar2db.py
   ├─ scripts/makeImage.sh             raw disk + losetup + mount + chroot yamaları
@@ -34,14 +49,16 @@ Temel özellikler ve sorunlar (ayrıntı: `SECURITY.md`, Aşama 1 raporu):
 | QEMU komutu | 4 kopya (`run.armel.sh`, `run.mipseb.sh`, `run.mipsel.sh`, `makeNetwork.py` şablonu) |
 | Test | yok |
 
+
+> **Gerçek durum (bu tablo `master`'ı anlatır):** `refactor/hardening`'de süreç yönetimi `qemu_pids` (bu kurulumun `image.raw` yolu) + süreç grubu ile, temizlik `release_emulation` ve `trap` ile, hata kodları `firmae/errors.py` ile, loglama `firmae/log.py` ile değişti; QEMU komutu hâlâ 4 kopya, test yalnızca `tests/unit` (428 test).
 ---
 
 ## 2. Tasarım ilkeleri
 
 1. **Davranışı koru, arayüzü koru.** `sudo ./run.sh -c|-a|-r|-d|-b <brand> <fw>` ve
    `docker-helper.py` komutları aynı kalır. `scratch/IID/` altındaki dosya adları
-   (`ip`, `web`, `ping`, `result`, `time_*` …) korunur; `util/collect_result.py` ve
-   `util/compare.py` değişmeden çalışmaya devam eder.
+   (`ip`, `web`, `ping`, `result`, `time_*` …) korunur; `util/collect_result.py`
+   değişmeden çalışmaya devam eder (not: `util/compare.py` ikinci turda kabuksuz yeniden yazıldı; çıktısı karşılaştırılmadı, doğrulanmadı).
 2. **Guest tarafı shell kalır.** `preInit.sh`, `network.sh`, `run_service.sh`,
    `inferFile.sh`, `fixImage.sh`, `injectionChecker.sh` firmware içinde/chroot'ta busybox ile
    çalışır; Python'a taşınmaz.
@@ -57,6 +74,9 @@ Temel özellikler ve sorunlar (ayrıntı: `SECURITY.md`, Aşama 1 raporu):
 ---
 
 ## 3. Önerilen klasör yapısı
+
+> **Gerçek durum:** bu ağaçtan yalnızca `firmae/{__main__,config,errors,log,pipeline,state}.py` var;
+> geri kalan modüller ve `stages/` önerilmiştir, yazılmamıştır. `tests/` altında yalnızca `unit/` ve `fixtures/` var (`integration/` yok).
 
 ```
 FirmAE/
@@ -123,6 +143,8 @@ __main__ ─► config ─► modes.<mod>(ctx)
 
 ## 5. Süreç yaşam döngüsü (Problem 3)
 
+> **Gerçek durum:** `proc.py`, `signals.py` ve `ResourceStack` yazılmadı. Karşılığı: `scripts/procgroup.py` (`run_with_timeout`: süreç grubu, SIGINT sonra SIGKILL; `raise_on_sigterm`), `firmae/pipeline.py` + `firmae/__main__.py` (aşama zaman aşımları, çıkış 130/143) ve `firmae.config` (`release_emulation`, `qemu_pids`). Aşağıdaki tablo ve kod bloğu tasarımdır.
+
 `proc.py` tek giriş noktasıdır:
 
 ```
@@ -146,10 +168,15 @@ run(argv, stage, timeout)  = spawn + wait(timeout) + stop() + exit code kontrol�
 | Ctrl-C / SIGTERM / SIGHUP | `signals.py` → `Cancelled` → ResourceStack ters sırada boşalır → exit 130/143 |
 | Orkestratör SIGKILL ile ölürse | Python çalışamaz; **journal** (aşağıda) bir sonraki çalıştırmada temizlenir |
 
-QEMU ayrıca `-pidfile scratch/IID/run/qemu.pid` ile başlatılır; böylece elle başlatılan
+> **Gerçek durum:** `-pidfile` **uygulanmadı** (kodda yok). Bugün bu kurulumun QEMU'ları `firmae.config`'teki `qemu_pids` ile
+> `/proc/<pid>/cmdline` içinde tam `scratch/<IID>/image.raw` yolu aranarak bulunur; süreç grubu `scripts/procgroup.py` ile durdurulur.
+
+(Öneri, uygulanmadı) QEMU ayrıca `-pidfile scratch/IID/run/qemu.pid` ile başlatılır; böylece elle başlatılan
 `scratch/IID/run.sh` de hedefli olarak durdurulabilir.
 
 ## 6. Kaynak yönetimi ve temizlik
+
+> **Gerçek durum:** `resources.py`, journal (`resources.json`) ve `python3 -m firmae cleanup` **uygulanmadı**. Temizlik `release_emulation <IID>` (`firmae.config`, `delete.sh`) ile yapılır; kilitler alındıktan sonra eski kalıntılar bir kez temizlenir. Aşağısı tasarımdır.
 
 `resources.py`:
 
@@ -177,7 +204,14 @@ Aynı IID için yeni bir çalıştırma başlarken journal varsa önce **eski ka
 `python3 -m firmae cleanup <IID>` elle kurtarma sağlar. PID kaydında başlangıç zamanı da
 tutulur; böylece PID yeniden kullanılmışsa yanlış süreç öldürülmez.
 
-**Eşzamanlılık:** her IID için `scratch/IID/run/lock` (`fcntl.flock`) → aynı firmware iki kez
+> **Gerçek durum (uygulandı, öneriden farklı):** `firmae/pipeline.py` iki `fcntl.flock` kilidi alır:
+> `scratch/.locks/<firmware md5>.lock` ilk çıkarımdan ÖNCE (IID henüz bilinmiyor) ve
+> `scratch/<IID>/.firmae.lock` IID bilindikten sonra. Alınamazsa çıkış kodu 75 (`BUSY`) ve hiçbir şeye dokunulmaz;
+> kilitler alındıktan sonra o IID'nin eski kaynakları bir kez temizlenir. `scratch/IID/run/lock` ve
+> `scratch/.slots/` **yoktur**; `FIRMAE_MAX_PARALLEL`/slot sınırı **uygulanmadı**; `.locks/*.lock` dosyaları birikir.
+> Yer tutucu NIC soketleri loopback'te IID'ye göre ayrılır (`20000 + 4*(IID % 10000) + n`); `hostfwd` 80/443 sabit kalır (yalnızca 127.0.0.1).
+
+(Öneri, uygulanmadı) **Eşzamanlılık:** her IID için `scratch/IID/run/lock` (`fcntl.flock`) → aynı firmware iki kez
 paralel çalışamaz. Global eşzamanlılık sınırı `FIRMAE_MAX_PARALLEL` (varsayılan: CPU/2) ile
 `scratch/.slots/` kilitleri üzerinden. Sabit portlar (2000-2003, hostfwd 80/443) kaldırılır
 (bkz. §8).
@@ -199,12 +233,14 @@ varsayılmaz). `metrics.py` her aşama sonunda QEMU RSS, CPU süresi, açık fd 
 | 2 | Kullanım hatası | — |
 | 3 | Root yetkisi yok / yapılandırma bulunamadı | — |
 | 10 | Çıkarım başarısız | `extraction fail` |
-| 11 | IID alınamadı (DB) | — |
+| 11 | IID alınamadı (DB boş döndü) | — |
+| 12 | Veritabanına ulaşılamadı / sorgu hatası | — |
 | 20 | Mimari tespit edilemedi / desteklenmiyor | `get architecture fail` / `not valid architecture : X` |
 | 30 | İmaj oluşturma başarısız | — (yeni) |
 | 40 | Ağ çıkarımı başarısız | — (yeni) |
 | 50 | Emülasyon erişilemez (web yok) | `false` |
 | 60 | Analiz başarısız | — |
+| 75 | Başka bir FirmAE çalıştırması bu firmware'i/imajı işliyor (`BUSY`, atlanır) | — |
 | 124 | Timeout | — |
 | 130 / 143 | Kullanıcı iptali (SIGINT) / SIGTERM | — |
 | 1 | Beklenmeyen iç hata (traceback log dosyasında) | — |
@@ -226,6 +262,8 @@ değişikliği**, bkz. `REFACTORING_PLAN.md`).
 
 ## 8. QEMU ve ağ mimarisi
 
+> **Gerçek durum:** `qemu.py`/`QemuSpec` yoktur; QEMU komutu hâlâ `scripts/run.<arch>.sh` (ön emülasyon) ve `makeNetwork.py` şablonunda (son emülasyon) ayrı ayrı üretilir. Tablonun "Mevcut" sütunu `master`'ı gösterir. `refactor/hardening`'de uygulananlar: soketler `scratch/IID/run/` altında (0700), `restrict=on`, `hostfwd` ve yer tutucu NIC'ler 127.0.0.1'de, TAP modunda iptables/ip6tables kuralları (netns yerine). Uygulanmayanlar: `ip tuntap` (üretilen `run.sh` hâlâ `tunctl` kullanır), dinamik `hostfwd` portları, `ip netns`. DHCP modu gerçek çalıştırmayla doğrulanmadı.
+
 `qemu.py` tek bir `QemuSpec` → `argv` dönüştürücüsü sağlar; arch tabloları (makine, kernel,
 disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karşılığıdır.
 
@@ -238,7 +276,9 @@ disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karş�
 | TAP | `sudo tunctl` | `ip tuntap` (iproute2), idempotent | uml-utilities bağımlılığı azalır |
 | İzolasyon (Faz 5) | yok | analiz başına `ip netns` | paralel analiz + host izolasyonu |
 
-`scratch/IID/run.sh` **üretilmeye devam eder** (kullanıcılar elle çalıştırıyor), ancak
+> **Gerçek durum:** `scratch/IID/run.sh` hâlâ `makeNetwork.py`'nin ürettiği **tam Bash şablonudur** (QEMU komutu, TAP/mount/temizlik trap'i, 16 satırlık imaj dosyası denetim bloğu); tek satırlık Python çağrısı **uygulanmadı**.
+
+(Öneri, uygulanmadı) `scratch/IID/run.sh` **üretilmeye devam eder** (kullanıcılar elle çalıştırıyor), ancak
 içeriği tek satırlık bir çağrı olur: `exec python3 -m firmae emulate <IID> --mode "$(basename "$0")"`.
 `run_debug.sh`, `run_analyze.sh`, `run_boot.sh` symlink'leri aynı kalır.
 

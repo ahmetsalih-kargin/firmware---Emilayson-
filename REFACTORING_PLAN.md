@@ -1,22 +1,23 @@
 # FirmAE Refactoring Planı
 
-> **Tamamlanma durumu (2026-11-08).** Bu belge planı olduğu gibi tutar; gerçek durum aşağıda.
+> **Tamamlanma durumu (2026-11-16, ikinci sağlamlaştırma turundan sonra).** Bu belge planı olduğu gibi tutar; gerçek durum aşağıda.
 > Ayrıntılı kanıt: `TEST_REPORT.md`, değişiklikler: `CHANGELOG.md`.
 
 | Faz | Durum | Yapılmayanlar / not |
 |---|---|---|
 | 0 Ölçüm | ✅ | — |
-| 1 Test iskeleti | ✅ | Kapsam: ağ çıkarımı, QEMU komutları, yaşam döngüsü, boru hattı (181 test). `extractor.py` ve `analyses/` büyük ölçüde testsiz |
+| 1 Test iskeleti | ✅ | Kapsam: ağ çıkarımı, QEMU komutları, yaşam döngüsü, boru hattı, kilitler, ikinci tur düzeltmeleri (**428 test**; ilk tamamlanışta 181). `tests/integration/` (root gerektiren) **yok** |
 | 2 Güvenlik/işlevsel | ✅ 2.1–2.9, 2.11, 2.12 | **2.10 yapılmadı** (port keşfi: dinamik `hostfwd` portları olmadan zararlı) |
-| 3 Süreç/kaynak | ✅ | Plandaki ayrı `proc/resources` paketi yerine `firmae.config` + `scripts/procgroup.py`. **cgroup sınırları, eşzamanlılık kilidi yok** |
-| 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.6 (aşama orkestrasyonu, çıkış kodları, loglama). ❌ 4.2–4.5 (`makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` hâlâ Bash/eski Python), ❌ 4.7 (kilitler, metrikler) |
-| 5 Ağ izolasyonu | **kısmen** | ✅ 5.1–5.3; 5.4 ağ namespace'i yerine iptables kuralları. **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı |
+| 3 Süreç/kaynak | ✅ | Plandaki ayrı `proc/resources` paketi yerine `firmae.config` + `scripts/procgroup.py`. **cgroup sınırları ve `FIRMAE_MAX_PARALLEL`/slot sınırı yok.** Eşzamanlılık kilidi artık **var** (ikinci tur: `scratch/.locks/<md5>.lock` + `scratch/<IID>/.firmae.lock`, çıkış 75); `.locks/*.lock` dosyaları birikir |
+| 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.6 (aşama orkestrasyonu, çıkış kodları, loglama) ve 4.7'nin kilit kısmı (ikinci tur: IID + firmware kilidi, aşama zaman aşımları). ❌ 4.2–4.5 (`makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` hâlâ Bash/eski Python), ❌ 4.7'nin metrikler ve `systemd-run` sınırları kısmı |
+| 5 Ağ izolasyonu | **kısmen** | ✅ 5.1–5.3; 5.4 ağ namespace'i yerine iptables/ip6tables kuralları. **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
+| İkinci sağlamlaştırma turu (2026-11-16, plan dışı) | ✅ | İki tur + bağımsız denetim: `SECURITY.md` S19-S25 (seri logdan komut enjeksiyonu P0 dahil), kilitler, zaman aşımları, sınırlar, `tar2db`/`util`/`extractor`/`docker-helper` hata yönetimi. Kod commit edilmedi. Ayrıntı: `CHANGELOG.md`, `TEST_REPORT.md` |
 | **6 Peripheral (Problem 1)** | **❌ hiç başlanmadı** | I2C/SPI/GPIO ölçümü ve mock yok |
 | **7 Bağımlılık/kurulum** | **❌ hiç başlanmadı** | Eski bağımlılıklar, `download.sh` checksum, `apt-key`, chromedriver 2.38, `ubuntu:20.04`, Ubuntu 24.04'te `install.sh` |
 
 Üç ana problem: **Problem 1 (peripheral)** hiç ele alınmadı; **Problem 2 (monolitik Bash)** kısmen
 (orkestrasyon taşındı, aşama script'leri taşınmadı); **Problem 3 (kaynak/zombi)** büyük ölçüde çözüldü
-(ölçüldü), kaynak sınırları ve eşzamanlılık kilidi eksik.
+(ölçüldü; ikinci turda IID/firmware kilidi eklendi), kaynak (cgroup) sınırları ve metrikler eksik.
 
 ## Çalışma kuralları
 

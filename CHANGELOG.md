@@ -6,6 +6,98 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Second hardening pass (2026-11-16)
+
+Two rounds of parallel fixes plus an independent review (see `TEST_REPORT.md`, last section).
+Test count 181 -> 428 (WSL Ubuntu 24.04, Python 3.12, not root); new findings S20-S25 and
+the closing of S19 are in `SECURITY.md`. Not committed at the time of writing.
+
+#### Security
+
+- **S20 (P0) command injection from the serial log:** `scripts/makeNetwork.py` took interface
+  and bridge names from the guest's serial log and pasted them into the generated root
+  script without validation. Parsing now uses strict patterns anchored with `\Z` (a trailing
+  newline is rejected; `$` accepts it), `checkQemuCmdInputs` validates everything a second
+  time before the script is written, and values are passed through `re.escape`. Numbers that
+  are absurdly long skip the line instead of reaching `int()`.
+- **S21 (P1) write to the host through a symlink in the image:** every write into the mounted
+  image (`openImageFile`, `firmadyneFile`) refuses a symlink or a non-regular file; the
+  generated `run.sh` template carries a 16-line check block for the files it writes itself
+  (`/firmadyne` directory, `network_type`, `net_bridge`, `net_interface`, `debug.sh`);
+  `mount_partition` and `makeNetwork.py` mount with `nodev,nosuid`.
+- **S22 (P1) `scripts/inferDefault.py`:** does not read a symlink or a non-regular file of the
+  image (it could read `/proc/kcore` or host files); the copy of `nvram_files` does not
+  follow symlinks.
+- **S23 (P2) guest-controlled resource use:** serial log read at most 64 MB; at most 4
+  networks, 64 interface records and 32 extra `hostfwd` ports (port 0 is rejected);
+  `inferDefault.py` is bounded to 600 s by `makeNetwork.py`, reads at most 64 MiB per file,
+  keeps at most 10 000 NVRAM keys of at most 256 bytes and no longer takes quadratic time
+  (1 MB file with 40k keys: 7.62 s -> 0.59 s); `fwscan.py` printable-run scan is linear
+  (an 80 KB printable block took 16.8 s); file names containing blanks/control characters
+  are skipped.
+- **S24 (P1) another installation's QEMU was stopped:** `qemu_pids` (`firmae.config`) matches
+  `/proc/<pid>/cmdline` against this installation's full `scratch/<IID>/image.raw` path
+  instead of a name pattern, so a QEMU of another checkout is left alone (verified in the
+  real run: an unrelated `qemu-system-arm` / `qemu-system-mipsel` survived).
+- **S25 (P2) no locking between concurrent runs:** see "Fixed" (firmware and image locks).
+- **S19 (P1) `util/compare.py`:** rewritten without a shell; resolves and detaches only its
+  own loop device; mounts `ro,nodev,nosuid,noexec`.
+- `secure_workdir` refuses `scratch/<IID>` when it is a symlink; `fuzzer.py` extracts with
+  `tar --no-same-owner --no-same-permissions`.
+
+#### Fixed
+
+- **Locks (S25):** `firmae/pipeline.py` takes `scratch/.locks/<md5 of the firmware>.lock`
+  BEFORE the first extraction (the image id is not known yet) and
+  `scratch/<IID>/.firmae.lock` once it is. A run that cannot get a lock exits with the new
+  code 75 and touches nothing. After the locks are held, leftovers of an earlier killed run of
+  that IID (QEMU, mount, loop, TAP) are released once. The lock file descriptors are not
+  inherited by stages. `.locks/*.lock` files are not deleted (they accumulate).
+- **Stage timeouts:** `tar2db` and image 3600 s; network `900 + candidates x (TIMEOUT +
+  CHECK_TIMEOUT + 300)`; `FIRMAE_TIMEOUT_TAR2DB`, `_IMAGE`, `_NETWORK` override (0 = no limit).
+  Return codes of the helper scripts are checked instead of ignored.
+- **check mode:** an image whose `result` is already `true` gets that file rewritten
+  unchanged, so `docker-helper.py` (which ignores results older than the run) accepts it.
+- `check_network`: returns at once when there is no IP (it used to spin); at most 8 IPs;
+  the deadline is checked after every IP.
+- `fuzzer.py` / `fwscan.py`: a malformed log line, several commas or a non-UTF-8 file no
+  longer crash; the extracted tree is removed on failure too; sockets are closed.
+- `analyses_all.sh`: warns and continues when `routersploit/rsf.py` is missing (empty
+  submodule); the exit code of each step goes to `analysis_log/steps`; `result` is still an
+  unconditional `true`.
+- `initializer.py`: `driver.quit()` in `try/finally`, also when a step raises. `debug.py`:
+  correct TAP name (`tap<IID>_<n>`), socket timeout, files read with `with`.
+- `tar2db.py`: digests computed in chunks, `ON CONFLICT DO NOTHING`, errors are no longer
+  swallowed, parameterised queries; files with identical content now get a row for every name.
+- `extractor.py`: the temporary directory is removed on every path (also SIGTERM).
+- `makeImage.sh`: when `/bin/a` is a FIFO, device or symlink it is removed and re-created.
+- `docker-helper.py`: waits up to 300 s for the image id, ignores a `result` older than the
+  run, reports failures, skips a malformed `.list` line.
+
+#### Changed behaviour
+
+- **Behaviour change:** new exit code **75** (`ExitCode.BUSY`): another FirmAE run holds this
+  firmware or image; the firmware is skipped.
+- **Behaviour change:** limits above (serial log 64 MB, 4 networks, 64 interface records, 32
+  extra ports, 10 000 NVRAM keys, 64 MiB files, 600 s for `inferDefault.py`); firmware beyond
+  them is processed with the excess ignored (usually with a warning).
+- **Behaviour change:** `tar2db.py` writes one row per file name, so `object_to_image` has more
+  rows than before for firmware with duplicate content; it exits 1 on a database error (it
+  used to exit 0 and import nothing) and 2 on wrong usage.
+- **Behaviour change:** `util.py get_iid|get_brand` exit 1 with an empty stdout on a database
+  error; "no record" stays exit 0. `extractor.py` exits 1 when the database is unreachable.
+  The pipeline reports a failed image-id or architecture lookup as exit 12 (database) instead of 11 or 20.
+- **Behaviour change:** `docker-helper.py` exits 1 if any firmware failed (it always exited 0);
+  empty list: exit 1.
+- **Behaviour change:** `makeImage.sh` exits 1 with an error when `/bin` of the image is not a
+  directory.
+- **Behaviour change:** `util/compare.py` mounts read-only and no longer touches loop devices
+  it did not create.
+- Generated `run.sh` differs from the previous commit only by the 16-line check block.
+- Not changed: `result` of `analyses_all.sh` is always `true`; TAP names and the iptables
+  comment `firmae:<IID>` are one namespace per host (two installations with the same IID
+  collide); `findPorts` does not recognise the real 4.1 kernel log format.
+
 ### Review of Phases 0-5 (2026-11-08): bugs, security, memory, performance
 
 Found by static analysis, a ResourceWarning-strict test run, probes and real emulation;
@@ -40,7 +132,7 @@ each item has a regression test (`tests/unit/test_audit_fixes.py` and others).
 - ShellCheck: the `error` (SC2145) in `check_emulation.sh` and the SC2155/SC2174 warnings in
   files I added are fixed; the remaining warnings are in code I did not write.
 - Tests: closed two files my own tests left open; the suite passes with ResourceWarning as error.
-- **Open, new:** S19 `util/compare.py` (see SECURITY.md).
+- **Found then, fixed in the second pass (2026-11-16):** S19 `util/compare.py` (see SECURITY.md).
 
 ### Phase 5 — network isolation (TAP mode: firewall rules instead of namespaces)
 

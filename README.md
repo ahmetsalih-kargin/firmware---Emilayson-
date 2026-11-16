@@ -67,6 +67,15 @@ $ sudo ./run.sh -a <brand> <firmware>
 $ sudo ./run.sh -r <brand> <firmware>
 ```
 
+## Exit codes, timeouts and environment variables (fork)
+
+`run.sh` no longer exits 0 on every failure: the codes are listed in `firmae/errors.py` (for
+example 10 extraction, 30 image, 40 network, 50 web unreachable, 75 another FirmAE run holds
+the same firmware or image and this one was skipped). Stage time limits can be changed with
+`FIRMAE_TIMEOUT_TAR2DB`, `FIRMAE_TIMEOUT_IMAGE` and `FIRMAE_TIMEOUT_NETWORK` (seconds, 0 = no
+limit); the database password is read from `FIRMAE_DB_PASSWORD` (default unchanged). Details
+and behaviour changes: `CHANGELOG.md`.
+
 ## Debug
 
 After `run.sh -c` finished.
