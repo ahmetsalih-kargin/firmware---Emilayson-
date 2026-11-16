@@ -87,7 +87,7 @@ put_top () {
     cp -- "${1}" "${IMAGE_DIR}/${2}"
 }
 image_path () {
-    python3 "${SCRIPT_DIR}/imagepath.py" "${IMAGE_DIR}" "${1}"
+    python3 "${SCRIPT_DIR}/imagepath.py" "${IMAGE_DIR}" "${@}"
 }
 
 put_top "$(which busybox)" busybox
@@ -135,8 +135,16 @@ chmod a+x "${IMAGE_DIR}/firmadyne/network.sh"
 cp "${SCRIPT_DIR}/run_service.sh" "${IMAGE_DIR}/firmadyne/run_service.sh"
 chmod a+x "${IMAGE_DIR}/firmadyne/run_service.sh"
 
-INJECTION_CHECKER=`image_path /bin/a`
-cp "${SCRIPT_DIR}/injectionChecker.sh" "${INJECTION_CHECKER}"
+# /bin/a may be a FIFO, device or symlink the firmware planted (cp would block on
+# a FIFO or write through a link): resolve only the directory part, remove
+# whatever is there and create a fresh regular file.
+INJECTION_CHECKER=`image_path /bin/a --no-follow-final`
+if [ ! -d "${INJECTION_CHECKER%/*}" ] || [ -L "${INJECTION_CHECKER%/*}" ]; then
+    echo "Error: /bin of the image is not a directory"
+    exit 1
+fi
+rm -f -- "${INJECTION_CHECKER}"
+cp -- "${SCRIPT_DIR}/injectionChecker.sh" "${INJECTION_CHECKER}"
 chmod a+x "${INJECTION_CHECKER}"
 
 touch "${IMAGE_DIR}/firmadyne/debug.sh"
