@@ -100,6 +100,27 @@ def test_missing_root_yields_nothing(tmp_path):
     assert fwscan.strings_of(str(tmp_path / "nope")) == []
 
 
+def test_long_printable_run_with_trailing_binary_is_linear(tmp_path):
+    """A regex `[...]*\\Z` search was quadratic here (4 MB took hours)."""
+    import time
+    f = tmp_path / "big"
+    f.write_bytes(b"a" * (4 << 20) + b"\x00tail string")
+    t = time.time()
+    got = fwscan.strings_of(str(f))
+    assert time.time() - t < 10
+    assert [len(s) for s in got] == [4 << 20, 11]
+
+
+@pytest.mark.parametrize("buf,tail", [
+    (b"", b""), (b"abc", b"abc"), (b"abc\x00", b""), (b"ab\x00cd\t e", b"cd\t e"),
+    (b"\xffabc ~", b"abc ~"), (b"abc\x7f", b""), (b"abc\x1f", b""),
+])
+def test_printable_tail(buf, tail):
+    import re
+    assert fwscan._printable_tail(buf) == tail
+    assert fwscan._printable_tail(buf) == re.compile(rb"[\t\x20-\x7e]*\Z").search(buf).group(0)
+
+
 # ------------------------------------------------- equivalence with GNU tools
 
 def sh(cmd, cwd):

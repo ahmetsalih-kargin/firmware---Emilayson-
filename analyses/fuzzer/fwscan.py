@@ -33,7 +33,14 @@ OVERLAP = 4096
 MAX_RUN = 16 << 20
 
 _PRINTABLE = re.compile(rb"[\t\x20-\x7e]{4,}")
-_PRINTABLE_TAIL = re.compile(rb"[\t\x20-\x7e]*\Z")
+_PRINTABLE_BYTES = b"\t" + bytes(range(0x20, 0x7F))
+
+
+def _printable_tail(buf):
+    """Trailing run of printable bytes of buf, in linear time. (A regex such as
+    `[...]*\\Z` used with search() is quadratic on a long run that is followed
+    by a non-printable byte.)"""
+    return buf[len(buf.rstrip(_PRINTABLE_BYTES)):]
 
 
 def _walk(root):
@@ -89,7 +96,7 @@ def iter_strings(path, min_len=4):
     carry = b""                       # printable run that may continue in the next block
     for block in _chunks(path):
         buf = carry + block
-        carry = _PRINTABLE_TAIL.search(buf).group(0)
+        carry = _printable_tail(buf)
         if len(carry) > MAX_RUN:      # pathological: flush instead of growing without bound
             carry = b""
             body = buf

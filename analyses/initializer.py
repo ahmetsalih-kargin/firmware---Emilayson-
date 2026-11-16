@@ -62,6 +62,9 @@ class Initializer:
 
         if self.brand == "netgear":
             idx = self.GetRadioIdx(self.driver.page_source)
+            if idx is None or idx < 0:
+                print("[-] Couldn't find the manual setting radio button")
+                return
             self.ClickRadio(idx)
             self.ClickNext()
             time.sleep(10)
@@ -86,10 +89,16 @@ class Initializer:
             return None
 
     def Close(self):
-        alert = self.GetAlert()
-        if alert:  # authentication alert
-            alert.dismiss()
-        self.driver.close()
+        if self.driver is None:  # already closed (idempotent)
+            return
+        try:
+            alert = self.GetAlert()
+            if alert:  # authentication alert
+                alert.dismiss()
+        finally:
+            # quit() (not close()) ends the browser and chromedriver processes too
+            driver, self.driver = self.driver, None
+            driver.quit()
 
     def SwitchFrame(self, pattern):
         self.driver.switch_to.default_content()
@@ -106,7 +115,10 @@ class Initializer:
         return False
 
     def GetRadioIdx(self, page):
-        return page.count('"radio"', 0, netgear_pattern.search(page).start()) - 1
+        m = netgear_pattern.search(page)
+        if m is None:
+            return None
+        return page.count('"radio"', 0, m.start()) - 1
 
     def ClickRadio(self, idx):
         self.driver.find_elements(By.XPATH, "//*[@type='radio']")[idx].click()
@@ -133,11 +145,15 @@ if __name__ == "__main__":
     Initialize()
 
     initializer = Initializer(sys.argv[1], sys.argv[2])
-    initializer.Connect()
+    # always end the browser, even if a step raises
+    try:
+        initializer.Connect()
+        try:
+            initializer.Run()
+        finally:
+            initializer.Close()
 
-    initializer.Run()
-    initializer.Close()
-
-    # some netgear firmware redirect to the public page at first time
-    initializer.Connect()
-    initializer.Close()
+        # some netgear firmware redirect to the public page at first time
+        initializer.Connect()
+    finally:
+        initializer.Close()

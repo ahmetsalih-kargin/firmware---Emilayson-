@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 import pdb
+import re
 from socket import *
 
 version_info = sys.version_info
@@ -14,11 +15,30 @@ if version_info >= (3, 13):
 else:
     import telnetlib
 
+NETCAT_TIMEOUT = 5.0  # seconds; a dead guest must not hang the debugger
+
+
+def parse_tap_ifaces(link_output, iid):
+    """Names of the tap<iid>_<n> interfaces in `ip -o link` output, ordered by n."""
+    found = []
+    for line in link_output.splitlines():
+        fields = line.split(":")
+        if len(fields) < 2:
+            continue
+        name = fields[1].strip().split("@")[0]
+        m = re.fullmatch(r"tap%d_(\d+)" % int(iid), name)
+        if m:
+            found.append((int(m.group(1)), name))
+    return [name for _, name in sorted(found)]
+
+
 class firmae_helper:
     def __init__(self, iid):
         self.iid = int(iid)
-        self.targetName = open("./scratch/%d/name" % iid).read().strip()
-        self.targetIP = open("./scratch/%d/ip" % iid).read().strip()
+        with open("./scratch/%d/name" % iid) as f:
+            self.targetName = f.read().strip()
+        with open("./scratch/%d/ip" % iid) as f:
+            self.targetIP = f.read().strip()
         self.telnetInit = False
         self.netcatOn = False
 
@@ -29,30 +49,50 @@ class firmae_helper:
     def connect(self):
         if not self.netcatOn:
             self.sock = socket(AF_INET, SOCK_STREAM)
+            self.sock.settimeout(NETCAT_TIMEOUT)
             print("[*] connecting to netcat (%s:%d)" % (self.targetIP, 31337))
             try:
                 self.sock.connect((self.targetIP, 31337))
-            except:
-                print("[-] failed to connect netcat")
+            except timeout:
+                print("[-] netcat connection timed out after %gs (is the guest running?)" % NETCAT_TIMEOUT)
+                self.sock.close()
+                return
+            except OSError as e:
+                print("[-] failed to connect netcat: %s" % e)
+                self.sock.close()
                 return
             self.netcatOn = True
             print("[+] netcat connected")
+
+    def _drop_connection(self):
+        self.netcatOn = False
+        self.telnetInit = False
+        self.sock.close()
 
     def sendrecv(self, cmd):
         self.connect()
 
         if self.netcatOn:
-            self.sock.send(cmd.encode())
-            time.sleep(1)
-            return self.sock.recv(2048).decode()
-        else:
-            return ""
+            try:
+                self.sock.send(cmd.encode())
+                time.sleep(1)
+                return self.sock.recv(2048).decode(errors="replace")
+            except timeout:
+                print("[-] no reply from the guest within %gs (it may have died)" % NETCAT_TIMEOUT)
+            except OSError as e:
+                print("[-] netcat connection lost: %s" % e)
+            self._drop_connection()
+        return ""
 
     def send(self, cmd):
         self.connect()
 
         if self.netcatOn:
-            self.sock.send(cmd.encode())
+            try:
+                self.sock.send(cmd.encode())
+            except OSError as e:
+                print("[-] netcat connection lost: %s" % e)
+                self._drop_connection()
 
     def initalize_telnet(self):
         for command in [
@@ -82,9 +122,19 @@ class firmae_helper:
     def show_processlist(self):
         print(self.sendrecv("ps\n"))
 
+    def tap_interface(self):
+        """First tap<iid>_<n> interface that exists, else tap<iid>_0."""
+        try:
+            out = subprocess.run(["ip", "-o", "link"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        ifaces = parse_tap_ifaces(out, self.iid)
+        return ifaces[0] if ifaces else "tap%d_0" % self.iid
+
     def tcpdump(self):
-        argument = input("sudo tcpdump -i tap%d " % self.iid)
-        subprocess.call(["sudo", "tcpdump", "-i", "tap%d" % self.iid] + shlex.split(argument))
+        iface = self.tap_interface()
+        argument = input("sudo tcpdump -i %s " % iface)
+        subprocess.call(["sudo", "tcpdump", "-i", iface] + shlex.split(argument))
 
     def file_transfer(self, target_filepath):
         file_name = os.path.basename(target_filepath)

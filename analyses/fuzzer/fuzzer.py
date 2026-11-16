@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import subprocess
+import http.client
 import socket
 import time
 import datetime
@@ -69,11 +70,30 @@ Man:"ssdp:discover"
 makebuf = lambda n: ("a" * (8 - len(str(n))) + str(n)) * 1250
 
 
+def strip_html_comments(data):
+    """Remove <!-- ... --> comments (also multi-line) from bytes. Same result as
+    re.sub(b"<!--.*?-->", b"", data, flags=re.DOTALL), but linear: with DOTALL the
+    regex rescans to the end of the file for every unclosed "<!--"."""
+    out = []
+    pos = 0
+    while True:
+        start = data.find(b"<!--", pos)
+        if start < 0:
+            break
+        end = data.find(b"-->", start + 4)
+        if end < 0:
+            break
+        out.append(data[pos:start])
+        pos = end + 3
+    out.append(data[pos:])
+    return b"".join(out)
+
+
 def readHTML(filepath):
+    """Decoded file content without HTML comments. Raises OSError or
+    UnicodeDecodeError on an unreadable / non-UTF-8 file (callers skip the file)."""
     with open(filepath, "rb") as f:
-        data = re.sub(b"(<!--.*?-->)", b"", f.read(), flags=re.MULTILINE)
-        return data.decode()
-    return ""
+        return strip_html_comments(f.read()).decode()
 
 
 def image_dir():
@@ -131,10 +151,29 @@ def get_open_port():
 def extract_image():
     os.makedirs(image_dir(), exist_ok=True)
     tarball = "../images/{}.tar.gz".format(IID)
-    res = subprocess.run(["tar", "xzf", tarball, "-C", image_dir()],
+    # The tarball holds an untrusted firmware tree and we may run as root: do not
+    # restore owners or permission bits (setuid). GNU tar already rejects ".."
+    # and absolute member names.
+    res = subprocess.run(["tar", "xzf", tarball, "--no-same-owner", "--no-same-permissions",
+                          "-C", image_dir()],
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if res.returncode != 0:
         print("[-] extracting {} failed: {}".format(tarball, res.stderr.decode(errors="replace").strip()))
+
+
+def parse_hnap_set(function_line):
+    """(key, value) from a `result_xml.Set("<path>/<key>", "<value>");` line, or
+    None when the line (from the firmware's scripts) has another shape."""
+    key, sep, value = function_line[15:-2].partition(",")
+    if not sep:
+        return None
+    key = key.strip()
+    value = value.strip()
+    key = key[key.rfind("/") + 1 : -1]
+    # only quoted, non-empty literals
+    if len(value) < 3 or value[0] != '"' or value[1] == '"' or value[-1] != '"':
+        return None
+    return key, value[1:-1]
 
 
 def get_information():
@@ -179,14 +218,17 @@ def get_information():
         hnap = "/HNAP1/" + filepath.split("/")[-1][:-4]
         if hnap in hnap_map:
             continue
-        with open(filepath, "rb") as f:
-            data = f.read()
+        try:
+            with open(filepath, "rb") as f:
+                data = f.read()
             # dlink UTF8 data
             if data[:3] == b"\xef\xbb\xbf":
                 data = data[3:].decode()
             else:
                 data = data.decode()
-            hnap_map[hnap] = data
+        except (OSError, UnicodeDecodeError):
+            continue                      # one bad file must not abort the analysis
+        hnap_map[hnap] = data
 
     for filename in fwscan.find_entries(root, "*upnp*", ignore_case=False):
         upnp_rx = re.compile(UPNP_REGEX)
@@ -202,7 +244,7 @@ def get_information():
         if filepath.find(".htm") != -1:
             try:
                 soup = BeautifulSoup(readHTML(filepath), "html.parser")
-            except:
+            except Exception:             # unreadable, non-UTF-8 or unparsable file
                 continue
         # .asp, .aspx (dlink, netgear)
         elif filepath.find(".asp") != -1:
@@ -213,7 +255,7 @@ def get_information():
                 need_login=True,
             )
             if status_code == 200:
-                response = re.sub(b"(<!--.*?-->)", b"", response, flags=re.MULTILINE)
+                response = strip_html_comments(response)
                 soup = BeautifulSoup(response.decode(), "html.parser")
             else:
                 continue
@@ -271,23 +313,23 @@ def get_information():
                 soup = BeautifulSoup(readHTML(filepath), "html.parser")
                 for script in soup.find_all("script", type="text/javascript"):
                     scripts.append(script.text)
-            except:
+            except Exception:             # unreadable, non-UTF-8 or unparsable file
                 continue
         elif filepath.find(".js") != -1:
-            scripts.append(readHTML(filepath))
+            try:
+                scripts.append(readHTML(filepath))
+            except (OSError, UnicodeDecodeError):
+                continue
         else:
             continue
 
         regex = re.compile(r"result_xml.Set\(.*,.*\);")
         for script in scripts:
             for function_line in regex.findall(script):
-                key, value = function_line[15:-2].split(",")
-                key = key.strip()
-                value = value.strip()
-                key = key[key.rfind("/") + 1 : -1]
-                if value[0] != '"' or value[1] == '"':
+                parsed = parse_hnap_set(function_line)
+                if parsed is None:
                     continue
-                value = value[1:-1]
+                key, value = parsed
                 if key not in key_value_map:
                     if value == "false":
                         value = "true"
@@ -348,17 +390,31 @@ def clear_image():
     shutil.rmtree(image_dir(), ignore_errors=True)
 
 
+MAX_INDEX_DIGITS = 18  # real indices are tiny; longer digit runs are guest garbage
+
+
+def parse_execve_index(line, dummy_length):
+    """Index encoded as d34d<digits> in a serial-log line, reduced to <=
+    dummy_length by dropping trailing digits; None if the line has no usable
+    marker. The log is written by the (untrusted) guest."""
+    m = re.search("d34d([0-9]+)", line, re.IGNORECASE)
+    if m is None or len(m.group(1)) > MAX_INDEX_DIGITS:
+        return None
+    num = int(m.group(1))
+    while num > dummy_length:
+        num = num // 10
+    return num
+
+
 def get_execve_log(dummy_length):
     execve_list = []
     serial_log = os.path.join(WORK_DIR, "qemu.final.serial.log")
     for line in fwscan.iter_strings(serial_log):
         if "[ANALYZE]" not in line or "d34d" not in line.lower():
             continue
-        match = re.search("d34d[0-9]+", line, re.IGNORECASE).group()
-
-        num = int(match[4:])
-        while num > dummy_length:
-            num = num // 10
+        num = parse_execve_index(line, dummy_length)
+        if num is None:
+            continue
 
         if num not in execve_list:
             execve_list.append(num)
@@ -366,23 +422,29 @@ def get_execve_log(dummy_length):
     return execve_list
 
 
+# network failures that mean "no answer" for the fuzzer (HTTPException: garbage reply)
+NET_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+
 def send_packet(port, packet):
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        sock.connect((TARGET, port))
-        sock.send(packet.encode())
-        data = sock.recv(1024 * 1024)
-        sock.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
+            sock.connect((TARGET, port))
+            sock.send(packet.encode())
+            data = sock.recv(1024 * 1024)
         time.sleep(0.01)
         return data
-    except:
+    except NET_ERRORS:
         return b""
 
 
 def send_udp_packet(port, packet):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(packet.encode(), (TARGET, port))
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(packet.encode(), (TARGET, port))
+    except NET_ERRORS as e:
+        print("[-] udp send to port {} failed: {}".format(port, e))
     time.sleep(0.1)  # because it doesn't return
 
 
@@ -440,7 +502,7 @@ def send_hnap_dummy(port, hnap, data="", header="", need_login=False):
             return data, 401
         else:
             return data, r.status_code
-    except:
+    except NET_ERRORS:
         return b"", 503
 
 
@@ -478,7 +540,7 @@ def send_http_dummy(port, uri, method, headers={}, params={}, need_login=False):
             )
         else:
             return b"", 503
-    except:
+    except NET_ERRORS:
         return b"", 503
 
     data = r.text.encode()
@@ -784,9 +846,11 @@ def main():
     print(infos)
 
     if infos:
-        extract_image()
-        cgi_map, hnap_map, ssdp_list, action_map = get_information()
-        clear_image()
+        try:
+            extract_image()
+            cgi_map, hnap_map, ssdp_list, action_map = get_information()
+        finally:
+            clear_image()   # never leave the extracted firmware tree behind
 
         dummy_list = send_dummy(infos, cgi_map, hnap_map, ssdp_list, action_map)
         time.sleep(10)
@@ -794,6 +858,8 @@ def main():
         dummy_idx_list = get_execve_log(len(dummy_list))
 
         for idx in dummy_idx_list:
+            if not 0 <= idx < len(dummy_list):   # d34d<N> with N == len is not a sent probe
+                continue
             print("[+] {}".format(dummy_list[idx]))
             fuzz(dummy_list[idx])
 
