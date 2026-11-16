@@ -8,6 +8,7 @@ import io
 import os
 import shutil
 import stat
+import time
 
 import pytest
 
@@ -70,7 +71,18 @@ def project(repo_root, tmp_path, monkeypatch):
     return root
 
 
-def run(project, option="check", firmware="/x/DIR-868L.zip", brand="dlink"):
+def fw(project, name="DIR-868L.zip"):
+    """A firmware file (the pipeline hashes it for its lock); content = name."""
+    d = project.parent / "x"
+    d.mkdir(exist_ok=True)
+    p = d / name
+    if not p.exists():
+        p.write_text(name)
+    return str(p)
+
+
+def run(project, option="check", firmware=None, brand="dlink"):
+    firmware = firmware or fw(project)
     cfg = config.load(str(project))
     out = io.StringIO()
     pipe = Pipeline(cfg, option, brand, Reporter(out=out, color=False))
@@ -89,7 +101,7 @@ def test_success(project):
         assert float((work / ("time_" + t)).read_text()) >= 0
     for mode in ("debug", "analyze", "boot"):
         assert os.readlink(work / ("run_%s.sh" % mode)) == "./run.sh"
-    assert "[*] /x/DIR-868L.zip emulation start!!!" in out
+    assert "[*] %s emulation start!!!" % fw(project) in out
     assert "[+] Web service on 192.168.0.1" in out
     assert "[IID] %s\n[MODE] check" % IID in out
     assert (work / "makeImage.log").read_text() == "building image for %s mipsel DIR-868L\n" % IID
@@ -104,7 +116,7 @@ def test_log_file_has_timestamp_level_iid_and_stage(project):
     lines = (work / "firmae.log").read_text().splitlines()
     assert lines, "no log"
     assert all(" [iid=" in l for l in lines)
-    assert any("[iid=-][start] /x/DIR-868L.zip emulation start!!!" in l for l in lines)   # buffered until the id was known
+    assert any("[iid=-][start] %s emulation start!!!" % fw(project) in l for l in lines)   # buffered until the id was known
     assert any("INFO  [iid=%s][arch] get architecture done!!!" % IID in l for l in lines)
     assert any("[iid=%s][network] infer network start!!!" % IID in l for l in lines)
     assert lines[0][:4].isdigit() and "T" in lines[0][:20]
@@ -140,7 +152,7 @@ def test_no_image_id(project, monkeypatch):
     code, out, _ = run(project)
     assert code == ExitCode.IMAGE_ID == 11
     assert "[-] extractor.py failed!" in out
-    assert not (project / "scratch").exists()
+    assert not (project / "scratch" / IID).exists()
 
 
 @pytest.mark.parametrize("arch,text", [("", "get architecture fail"),
@@ -177,7 +189,7 @@ def test_docker_mode_database_check(project, monkeypatch):
     # the early check matters here
     cfg = config.load(str(project))
     out = io.StringIO()
-    code = Pipeline(cfg, "check", "dlink", Reporter(out=out, color=False)).run_firmware("/x/a.zip")
+    code = Pipeline(cfg, "check", "dlink", Reporter(out=out, color=False)).run_firmware(fw(project, "a.zip"))
     assert code == ExitCode.DATABASE
     assert "docker container failed to connect to the hosts' postgresql!" in out.getvalue()
 
@@ -191,6 +203,29 @@ def test_check_mode_skips_firmware_that_already_succeeded(project):
     assert not (project / "image_done").exists()
 
 
+def test_check_mode_skip_rewrites_the_result_for_docker_helper(project):
+    """docker-helper.py ignores a result older than its run (mtime): the skip
+    path must leave a fresh result with the same content."""
+    work = project / "scratch" / IID
+    work.mkdir(parents=True)
+    (work / "result").write_text("true\n")
+    os.utime(work / "result", (1000, 1000))
+    t0 = time.time()
+    code, _, _ = run(project)
+    assert code == ExitCode.OK and not (project / "image_done").exists()
+    assert (work / "result").read_text() == "true\n"
+    assert os.path.getmtime(work / "result") >= t0 - 1
+
+
+def test_unreadable_firmware_is_reported_as_such(project, tmp_path):
+    missing = str(tmp_path / "no-such-firmware.bin")
+    code, out, _ = run(project, firmware=missing, brand="auto")
+    assert code == ExitCode.EXTRACTION
+    assert "cannot read firmware %s" % missing in out
+    assert "database" not in out
+    assert not (project / "extractor_calls").exists()
+
+
 def test_check_mode_reruns_after_a_failed_result(project):
     work = project / "scratch" / IID
     work.mkdir(parents=True)
@@ -202,8 +237,8 @@ def test_check_mode_reruns_after_a_failed_result(project):
 def test_brand_auto_is_resolved_per_firmware_without_sticking(project):
     cfg = config.load(str(project))
     pipe = Pipeline(cfg, "check", "auto", Reporter(out=io.StringIO(), color=False))
-    pipe.run_firmware("/x/a.zip")
-    pipe.run_firmware("/x/b.zip")
+    pipe.run_firmware(fw(project, "a.zip"))
+    pipe.run_firmware(fw(project, "b.zip"))
     assert pipe.brand == "auto"               # the old script overwrote BRAND after the first file
     calls = (project / "extractor_calls").read_text().splitlines()
     assert all(c.startswith("-b dlink ") for c in calls)
@@ -296,7 +331,7 @@ def test_unicode_digits_are_not_an_image_id(project, monkeypatch):
     monkeypatch.setenv("STUB_IID", "²")            # "²".isdigit() is True
     code, out, _ = run(project)
     assert code == ExitCode.IMAGE_ID
-    assert not (project / "scratch").exists()
+    assert not (project / "scratch" / IID).exists()
 
 
 def test_a_hanging_helper_times_out_instead_of_hanging_forever(project, monkeypatch):
@@ -306,6 +341,106 @@ def test_a_hanging_helper_times_out_instead_of_hanging_forever(project, monkeypa
     code, out, _ = run(project)
     assert code == ExitCode.TIMEOUT == 124
     assert "util.py timed out after 1s" in out
+
+
+# ------------------------------------------------- stage time limits
+
+def test_a_hanging_stage_is_stopped_and_reports_timeout(project, monkeypatch):
+    """makeImage.sh (and a child it started) hang: the whole process group is
+    stopped at the limit and the firmware fails with exit 124."""
+    from firmae import pipeline
+    monkeypatch.setattr(pipeline, "STAGE_GRACE", 1)
+    monkeypatch.setenv("FIRMAE_TIMEOUT_IMAGE", "1")
+    (project / "scripts/makeImage.sh").write_text(
+        '#!/bin/bash\necho "hanging now"\nsleep 300 &\necho $! > "$PROJECT/child_pid"\n'
+        'trap "" INT\nwait\n')                                     # ignores SIGINT -> SIGKILL after the grace
+    t0 = time.time()
+    code, out, work = run(project)
+    assert code == ExitCode.TIMEOUT == 124
+    assert time.time() - t0 < 30
+    assert "makeImage.sh timed out after 1s; last lines of" in out
+    assert "hanging now" in out
+    child = int((project / "child_pid").read_text())
+    for _ in range(50):                                            # killed with its group
+        if not os.path.exists("/proc/%d" % child) or open("/proc/%d/stat" % child).read().split(")")[-1].split()[0] == "Z":
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the stage's child survived the timeout")
+    assert not (work / "ping").exists()                            # makeNetwork never ran
+
+
+def test_stage_timeouts_default_and_override(project, monkeypatch):
+    from firmae import pipeline
+    monkeypatch.delenv("FIRMAE_TIMEOUT_NETWORK", raising=False)
+    seen = {}
+    real = pipeline.run_with_timeout
+
+    def spy(argv, timeout, **kw):
+        seen[os.path.basename(argv[2] if argv[0] == "python3" else argv[0])] = timeout
+        return real(argv, timeout, **kw)
+    monkeypatch.setattr(pipeline, "run_with_timeout", spy)
+    (project / "scripts/makeImage.sh").write_text(
+        '#!/bin/bash\nprintf "/sbin/rcS\\n/sbin/preinit\\n/firmadyne/preInit.sh\\n" > scratch/$1/init\n')
+    code, _, _ = run(project)
+    assert code == ExitCode.OK
+    # 3 init candidates x (TIMEOUT 360 + CHECK_TIMEOUT 360 + margin) + base
+    assert seen == {"tar2db.py": pipeline.TAR2DB_TIMEOUT, "makeImage.sh": pipeline.IMAGE_TIMEOUT,
+                    "makeNetwork.py": pipeline.NETWORK_BASE_TIMEOUT + 3 * (720 + pipeline.NETWORK_PER_INIT_MARGIN),
+                    "extractor.py": pipeline.EXTRACT_TIMEOUT}
+    assert seen["makeNetwork.py"] > 3 * 420                        # measured: ~420 s per candidate
+    monkeypatch.setenv("FIRMAE_TIMEOUT_NETWORK", "0")              # 0: no limit
+    monkeypatch.setenv("FIRMAE_TIMEOUT_TAR2DB", "77")
+    monkeypatch.setenv("FIRMAE_TIMEOUT_IMAGE", "junk")             # ignored
+    shutil.rmtree(project / "scratch")
+    assert run(project)[0] == ExitCode.OK
+    assert (seen["makeNetwork.py"], seen["tar2db.py"], seen["makeImage.sh"]) == (None, 77, pipeline.IMAGE_TIMEOUT)
+
+
+# ------------------------------------------------- helper exit codes
+
+def test_database_error_on_image_id_lookup_is_not_no_image_id(project):
+    (project / "scripts/util.py").write_text(
+        '#!/bin/bash\ncase "$1" in get_iid) echo "util.py: get_iid failed: boom" >&2; exit 1;; esac\n')
+    code, out, _ = run(project)
+    assert code == ExitCode.DATABASE
+    assert "image id lookup failed (util.py get_iid exit 1" in out
+    assert "is the database reachable" not in out          # util.py's own message says why
+    assert not (project / "scratch" / IID).exists()
+
+
+def test_database_error_on_brand_lookup(project):
+    (project / "scripts/util.py").write_text(
+        '#!/bin/bash\ncase "$1" in get_brand) exit 1;; get_iid) echo -n %s;; esac\n' % IID)
+    cfg = config.load(str(project))
+    out = io.StringIO()
+    code = Pipeline(cfg, "check", "auto", Reporter(out=out, color=False)).run_firmware(fw(project, "a.zip"))
+    assert code == ExitCode.DATABASE
+    assert "brand lookup failed" in out.getvalue()
+    assert not (project / "extractor_calls").exists()
+
+
+def test_unknown_brand_still_runs_without_brand_argument(project):
+    (project / "scripts/util.py").write_text(
+        '#!/bin/bash\ncase "$1" in get_brand) echo "";; get_iid) echo -n %s;; esac\n' % IID)
+    cfg = config.load(str(project))
+    code = Pipeline(cfg, "check", "auto", Reporter(out=io.StringIO(), color=False)).run_firmware(fw(project, "a.zip"))
+    assert code == ExitCode.OK
+    assert (project / "extractor_calls").read_text().splitlines()[0].startswith("-sql ")
+
+
+@pytest.mark.parametrize("stdout,code,result", [("", ExitCode.ARCH, "get architecture fail\n"),
+                                                 ("mipsel", ExitCode.DATABASE, None)])
+def test_getarch_failure_exit_code_is_not_ignored(project, stdout, code, result):
+    (project / "scripts/getArch.py").write_text('#!/bin/bash\necho -n "%s"\nexit 1\n' % stdout)
+    got, out, work = run(project)
+    assert got == code
+    assert "getArch.py" in out
+    if result is None:
+        assert not (work / "result").exists()
+    else:
+        assert (work / "result").read_text() == result
+    assert not (project / "image_done").exists()
 
 
 def test_database_connect_timeout_is_set_for_helpers(project, monkeypatch):
@@ -325,7 +460,7 @@ def test_many_firmwares_leak_neither_file_descriptors_nor_memory(project):
             return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
 
     def one(i):
-        assert pipe.run_firmware("/x/fw%d.zip" % i) == ExitCode.OK
+        assert pipe.run_firmware(fw(project, "fw%d.zip" % i)) == ExitCode.OK
         shutil.rmtree(project / "scratch")
 
     for i in range(5):                   # warm-up (imports, caches)

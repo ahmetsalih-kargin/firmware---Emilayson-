@@ -8,6 +8,11 @@ docker ps -aq --filter ancestor=fcore | xargs -r docker rm -f
 
 # mounts and loop devices of FirmAE images (scratch/<IID>/image.raw), on the
 # host or created inside a container (/work/FirmAE/scratch/...)
+# Deliberately not limited to one installation (unlike firmae.config's
+# release_emulation and scripts/delete.sh): this is the manual "remove every
+# FirmAE leftover on this host" tool -- like the fcore containers above -- and
+# a container's paths (/work/FirmAE/...) are not this checkout's SCRATCH_DIR.
+# It stops no processes.
 findmnt -rn -o TARGET | grep -E '/scratch/[0-9]+/image$' | sort -r | while read -r MNT; do
     sudo umount "${MNT}"
 done

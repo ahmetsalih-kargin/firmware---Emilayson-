@@ -45,10 +45,19 @@ if (egrep -sq true ${WORK_DIR}/isDhcp); then
   IPS+=("127.0.0.1")
   echo true > ${WORK_DIR}/ping
 else
-  IP_NUM=`cat ${WORK_DIR}/ip_num`
+  # a missing/garbled ip_num must not end the script under `set -e` before
+  # finish() has stopped run.sh (no IP: check_network returns at once)
+  IP_NUM=`cat "${WORK_DIR}/ip_num" 2>/dev/null || true`
+  [[ "${IP_NUM}" =~ ^[0-9]+$ ]] || IP_NUM=0
+  # the count comes from the guest: no more than check_network probes; 10#
+  # because "08" is not octal, and a huge number is just "many"
+  if [ ${#IP_NUM} -gt 4 ] || [ $((10#${IP_NUM})) -gt ${CHECK_MAX_IPS} ]; then
+    IP_NUM=${CHECK_MAX_IPS}
+  fi
+  IP_NUM=$((10#${IP_NUM}))
   for (( IDX=0; IDX<${IP_NUM}; IDX++ ))
   do
-    IPS+=(`cat ${WORK_DIR}/ip.${IDX}`)
+    IPS+=(`cat "${WORK_DIR}/ip.${IDX}" 2>/dev/null || true`)
   done
 fi
 

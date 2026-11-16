@@ -19,18 +19,17 @@ WORK_DIR=`get_scratch ${IID}`
 IMAGE=`get_fs ${IID}`
 IMAGE_DIR=`get_fs_mount ${IID}`
 
-# Every process of this image references ".../scratch/<IID>/" (image path,
-# run.sh, logs) -- on the host and, in Docker mode, as /work/FirmAE/scratch/...
-# Matching "/scratch/<IID>/" -- not just the number -- keeps IID 1 from
-# matching IID 10, 11, 21, ... (the old `grep "${IID}"` did).
-PATTERN="/scratch/${IID}/"
+# Every process of this image references "${SCRATCH_DIR}/<IID>/" (image path,
+# run.sh, logs). scratch_pids (firmae.config) compares with this
+# installation's full path: the old `pgrep -f "/scratch/<IID>/"` also matched
+# the processes of another FirmAE copy on the host that uses the same IID.
 echo "checking the process table for processes of image ${IID} ..."
-PIDS=`pgrep -f -- "${PATTERN}" || true`
+PIDS=`scratch_pids ${IID}`
 if [ -n "${PIDS}" ]; then
     echo "stopping processes: ${PIDS}"
     sudo kill ${PIDS} 2>/dev/null || true
     sleep 3
-    PIDS=`pgrep -f -- "${PATTERN}" || true`
+    PIDS=`scratch_pids ${IID}`
     if [ -n "${PIDS}" ]; then
         echo "killing processes: ${PIDS}"
         sudo kill -9 ${PIDS} 2>/dev/null || true

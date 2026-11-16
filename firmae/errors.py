@@ -21,6 +21,7 @@ class ExitCode(enum.IntEnum):
     NETWORK = 40            # network inference failed
     UNREACHABLE = 50        # emulation ran, but no web service
     ANALYSIS = 60
+    BUSY = 75               # another FirmAE run holds this image (EX_TEMPFAIL); skipped
     TIMEOUT = 124
     SIGHUP = 129
     SIGINT = 130

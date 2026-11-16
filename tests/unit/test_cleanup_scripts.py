@@ -37,17 +37,23 @@ def calls(log):
     return log.read_text().splitlines() if log.exists() else []
 
 
-def test_delete_sh_targets_only_its_own_image(repo_root, tmp_path, fake_system):
+def test_delete_sh_targets_only_its_own_image(repo_root, tmp_path, fake_system, request):
     bindir, log = fake_system
     root = tmp_path / "FirmAE"
     (root / "scripts").mkdir(parents=True)
     (root / "scratch" / "1").mkdir(parents=True)
     shutil.copy(repo_root / "firmae.config", root)
     shutil.copy(repo_root / "scripts" / "delete.sh", root / "scripts")
-    # pgrep answers only for the exact pattern; 999999 cannot be a real PID
-    # (> pid_max), so even a mistake here could not signal a real process
-    stub(bindir, "pgrep", 'case "$3" in "/scratch/1/") echo 999999 ;; esac; %s' %
-         ('echo "pgrep $*" >> "%s"' % log))
+    # Processes are found in /proc (scratch_pids): harmless sleepers whose
+    # command line names this installation's image 1, another installation's
+    # image 1 and image 11. `kill` is a stub: nothing is signalled.
+    sleepers = {}
+    for key, path in (("mine", root / "scratch/1/image.raw"),
+                      ("other_install", tmp_path / "Other/FirmAE/scratch/1/image.raw"),
+                      ("iid11", root / "scratch/11/image.raw")):
+        sleepers[key] = subprocess.Popen(["python3", "-c", "import time; time.sleep(600)",
+                                          "-drive", "if=ide,format=raw,file=%s" % path])
+    request.addfinalizer(lambda: [p.kill() or p.wait() for p in sleepers.values()])
     stub(bindir, "mountpoint", "exit 1")
     stub(bindir, "losetup", 'echo "losetup $*" >> "%s"' % log)
     stub(bindir, "ip", 'printf "%%s\\n" '
@@ -59,8 +65,8 @@ def test_delete_sh_targets_only_its_own_image(repo_root, tmp_path, fake_system):
                          capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stdout + res.stderr
     c = calls(log)
-    assert "pgrep -f -- /scratch/1/" in c
-    assert c.count("kill 999999") == 1 and "kill -9 999999" in c
+    mine = sleepers["mine"].pid
+    assert [x for x in c if x.startswith("kill")] == ["kill %d" % mine, "kill -9 %d" % mine]
     deletes = [x for x in c if x.startswith("ip link delete")]
     assert deletes == ["ip link delete tap1_0.2", "ip link delete tap1_0", "ip link delete tap1_1"]
     assert "rm -f /tmp/qemu.1 /tmp/qemu.1.S1" in c
