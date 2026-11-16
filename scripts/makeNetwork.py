@@ -21,6 +21,146 @@ debug = 0
 SCRATCHDIR = ""
 SCRIPTDIR = ""
 
+# ---------------------------------------------------------------------------
+# Untrusted input. The serial log and the image are written by the emulated
+# firmware, and run.sh (generated from them) runs as root on the host. Every
+# value that reaches QEMUCMDTEMPLATE is checked against a whitelist, once when
+# it is parsed (bad records are skipped) and again in qemuCmd() (bad values
+# raise), so no log line can become shell code.
+# ---------------------------------------------------------------------------
+
+# Linux interface names: at most IFNAMSIZ-1 = 15 bytes. ':' is kept for alias
+# labels (eth0:1); none of these characters is special inside "..." in bash.
+# The first one must be alphanumeric, so "eth0.1".split(".")[0] (buildConfig)
+# is never empty and no name looks like a command-line option.
+# \Z, not $: "$" also matches before a trailing newline, so "eth0\n" was accepted.
+IFNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}\Z")
+MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}\Z")
+IPV4_RE = re.compile(r"^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+                     r"(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}\Z")
+QEMU_INIT_RE = re.compile(r"^(rd)?init=/[A-Za-z0-9_./-]+\Z")
+NETWORK_TYPES = ("None", "normal", "reload", "bridge", "bridgereload", "default")
+MAX_VLAN_ID = 4094
+MAX_U32 = 0xFFFFFFFF
+# The guest can make the serial log (and its init script) arbitrarily large.
+MAX_READ = 64 * 1024 * 1024
+# QEMU attaches at most 4 NICs (interfaceNum in qemuNetworkConfig); more
+# networks would only create unused TAP devices and ip.N files.
+MAX_NETWORKS = 4
+MAX_INTERFACES = 64     # parsed "interface with address" records, before filtering
+MAX_FORWARD_PORTS = 32  # extra hostfwd rules besides 80/443 (user network)
+INFER_DEFAULT_TIMEOUT = 600   # seconds for scripts/inferDefault.py
+MAX_WARNINGS = 5        # per parser call, so a flood of bad lines cannot flood the log
+
+
+class UnsafeValue(ValueError):
+    """A firmware-controlled value that must not reach run.sh."""
+
+
+class UnsafeImagePath(Exception):
+    """A path in the (guest-written) image that the host must not write through."""
+
+
+def isIfname(name):
+    return isinstance(name, str) and IFNAME_RE.match(name) is not None
+
+
+def isIpv4(ip):
+    return isinstance(ip, str) and IPV4_RE.match(ip) is not None
+
+
+def _isInt(v, lo, hi):
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _decodeIfname(raw):
+    """bytes from the log -> interface name, or None if it is not a safe one."""
+    try:
+        name = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return name if isIfname(name) else None
+
+
+def _hexU32(raw):
+    """Hex digits from the log -> int, or None if it does not fit 32 bits
+    (struct.pack used to raise on those and abort makeNetwork)."""
+    if len(raw.lstrip(b"0")) > 8:
+        return None
+    return int(raw, 16)
+
+
+def _reportSkipped(kind, skipped):
+    for line in skipped[:MAX_WARNINGS]:
+        print("[!] Warning: skipped invalid %s record: %r" % (kind, line[:120]))
+    if len(skipped) > MAX_WARNINGS:
+        print("[!] Warning: skipped %d more invalid %s records"
+              % (len(skipped) - MAX_WARNINGS, kind))
+
+
+def readLimited(path, limit=MAX_READ):
+    """Read at most `limit` bytes of a guest-written log. Beyond the limit the
+    rest is dropped, cut at the last complete line (a cut-off line could yield
+    a truncated interface name)."""
+    with open(path, "rb") as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        print("[!] Warning: %s is larger than %d bytes; only the first %d are parsed"
+              % (path, limit, limit))
+        data = data[:limit]
+        data = data[:data.rfind(b"\n") + 1]
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Writing into the image after the guest has run. A symlink planted by the
+# guest (/firmadyne -> /etc, /firmadyne/preInit.sh -> /root/.bashrc, a device
+# node, ...) must never redirect a host root write.
+# ---------------------------------------------------------------------------
+
+def imageFile(imageRoot, relPath, expected=None):
+    """Host path of image file `relPath` that is safe to open: every directory
+    on the way is resolved inside the image (resolve_in_root), the file itself
+    is not a symlink and, if present, is a regular file. `expected` (a path an
+    earlier call returned) additionally requires that the guest has not changed
+    the directories in between. Raises UnsafeImagePath otherwise."""
+    path = resolve_in_root(imageRoot, relPath, follow_final=False)
+    if expected is not None and path != expected:
+        raise UnsafeImagePath("%s now resolves to %s (was %s)" % (relPath, path, expected))
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return path
+    if not stat.S_ISREG(st.st_mode):
+        raise UnsafeImagePath("%s is not a regular file" % path)
+    return path
+
+
+def firmadyneFile(targetDir, name):
+    """/firmadyne/<name> of the image. FirmAE created that directory itself, so
+    any symlink on the way means the guest tampered with it: refuse."""
+    root = os.path.realpath(targetDir + "/image")
+    path = imageFile(root, "/firmadyne/" + name)
+    if path != os.path.join(root, "firmadyne", name):
+        raise UnsafeImagePath("/firmadyne/%s is redirected to %s" % (name, path))
+    return path
+
+
+def openImageFile(path, mode):
+    """open() that does not follow a symlink in the last component (checked
+    before, but O_NOFOLLOW keeps it so) and does not block on a FIFO."""
+    flags = {"rb": os.O_RDONLY, "ab": os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+             "wb": os.O_WRONLY | os.O_TRUNC | os.O_CREAT}[mode]
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UnsafeImagePath("%s is not a regular file" % path)
+        os.set_blocking(fd, True)
+        return os.fdopen(fd, mode)
+    except BaseException:
+        os.close(fd)
+        raise
+
 QEMUCMDTEMPLATE = """#!/bin/bash
 
 set -e
@@ -112,6 +252,22 @@ DEVICE=`add_partition "${WORK_DIR}/image.raw"`
 IMAGE_ATTACHED=true
 mount_partition ${DEVICE} ${WORK_DIR}/image > /dev/null
 
+# The guest wrote this file system during earlier runs and the writes below run
+# as root on the host: refuse a symlinked /firmadyne and any target that is not
+# a regular file (a symlink, FIFO or device node would redirect the write).
+GUEST_DIR=${WORK_DIR}/image/firmadyne
+if [ -L "${GUEST_DIR}" ] || [ ! -d "${GUEST_DIR}" ]; then
+    echo "Error: ${GUEST_DIR} is not a plain directory" >&2
+    exit 1
+fi
+for GUEST_FILE in network_type net_bridge net_interface debug.sh; do
+    GUEST_FILE=${GUEST_DIR}/${GUEST_FILE}
+    if [ -L "${GUEST_FILE}" ] || { [ -e "${GUEST_FILE}" ] && [ ! -f "${GUEST_FILE}" ]; }; then
+        echo "Error: ${GUEST_FILE} is not a regular file" >&2
+        exit 1
+    fi
+done
+
 echo "%(NETWORK_TYPE)s" > ${WORK_DIR}/image/firmadyne/network_type
 echo "%(NET_BRIDGE)s" > ${WORK_DIR}/image/firmadyne/net_bridge
 echo "%(NET_INTERFACE)s" > ${WORK_DIR}/image/firmadyne/net_interface
@@ -166,8 +322,10 @@ def mountImage(targetDir):
     # then went to the empty mount-point directory on the host.
     # The partition node can still be settling right after add_partition; retry
     # briefly before giving up.
+    # nodev,nosuid: device nodes and setuid files the guest put into the image
+    # have no effect on the host while it is mounted here.
     for attempt in range(5):
-        res = subprocess.run(["mount", loopFile, "%s/image" % targetDir],
+        res = subprocess.run(["mount", "-o", "nodev,nosuid", loopFile, "%s/image" % targetDir],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if res.returncode == 0:
             break
@@ -216,15 +374,21 @@ def findMacChanges(data, endianness):
     prog = re.compile(
         rb"^ioctl_SIOCSIFHWADDR\[[^\]]+\]: dev:([^ ]+) mac:0x([0-9a-f]+) 0x([0-9a-f]+)"
     )
+    skipped = []
     for c in candidates:
         g = prog.match(c)
         if g:
             (iface, mac0, mac1) = g.groups()
-            iface = iface.decode("utf-8")
-            m0 = struct.pack(fmt, int(mac0, 16))[2:]
-            m1 = struct.pack(fmt, int(mac1, 16))
+            iface = _decodeIfname(iface)
+            mac0, mac1 = _hexU32(mac0), _hexU32(mac1)
+            if iface is None or mac0 is None or mac1 is None:
+                skipped.append(c)
+                continue
+            m0 = struct.pack(fmt, mac0)[2:]
+            m1 = struct.pack(fmt, mac1)
             mac = "%02x:%02x:%02x:%02x:%02x:%02x" % struct.unpack("BBBBBB", m0 + m1)
             result.append((iface, mac))
+    _reportSkipped("MAC change", skipped)
     return result
 
 
@@ -242,16 +406,23 @@ def findPorts(data, endianness):
         rb"^inet_bind\[[^\]]+\]: proto:SOCK_(DGRAM|STREAM), ip:port: 0x([0-9a-f]+):([0-9]+)"
     )
     portSet = {}
+    skipped = []
     for c in candidates:
         g = prog.match(c)
         if g:
             (proto, addr, port) = g.groups()
             proto = "tcp" if proto == b"STREAM" else "udp"
-            addr = socket.inet_ntoa(struct.pack(fmt, int(addr, 16)))
-            port = int(port.decode())
+            addr = _hexU32(addr)
+            # length check first: int() refuses very long decimal strings
+            port = int(port) if len(port) <= 5 else None
+            if addr is None or port is None or not 1 <= port <= 65535:
+                skipped.append(c)
+                continue
+            addr = socket.inet_ntoa(struct.pack(fmt, addr))
             if port not in portSet:
                 result.append((proto, addr, port))
                 portSet[port] = True
+    _reportSkipped("inet_bind", skipped)
     return result
 
 
@@ -269,14 +440,24 @@ def findNonLoInterfaces(data, endianness):
     elif endianness == "el":
         fmt = "<I"
     prog = re.compile(rb"^__inet_insert_ifa\[[^\]]+\]: device:([^ ]+) ifa:0x([0-9a-f]+)")
+    skipped = []
     for c in candidates:
         g = prog.match(c)
         if g:
             (iface, addr) = g.groups()
-            iface = iface.decode("utf-8")
-            addr = socket.inet_ntoa(struct.pack(fmt, int(addr, 16)))
+            iface = _decodeIfname(iface)
+            addr = _hexU32(addr)
+            if iface is None or addr is None:
+                skipped.append(c)
+                continue
+            addr = socket.inet_ntoa(struct.pack(fmt, addr))
             if addr != "127.0.0.1" and addr != "0.0.0.0":
+                if len(result) >= MAX_INTERFACES:
+                    print("[!] Warning: more than %d interfaces with an address; "
+                          "ignoring the rest" % MAX_INTERFACES)
+                    break
                 result.append((iface, addr))
+    _reportSkipped("interface address", skipped)
     return result
 
 
@@ -286,23 +467,33 @@ def findIfacesForBridge(data, brif):
     candidates = filter(
         lambda l: l.startswith(b"br_dev_ioctl") or l.startswith(b"br_add_if"), lines
     )
+    # re.escape: the name is data, not a pattern ("br(" used to raise re.error)
     progs = [
-        re.compile(p % brif.encode())
+        re.compile(p % re.escape(brif.encode()))
         for p in [
             rb"^br_dev_ioctl\[[^\]]+\]: br:%s dev:(.*)",
             rb"^br_add_if\[[^\]]+\]: br:%s dev:(.*)",
         ]
     ]
+    skipped = []
     for c in candidates:
         for p in progs:
             g = p.match(c)
             if g:
                 iface = g.group(1)
-                iface = iface.decode("utf-8")
+                try:
+                    iface = iface.decode("utf-8")
+                except UnicodeDecodeError:
+                    skipped.append(c)
+                    continue
                 # we only add it if the interface is not the bridge itself
                 # there are images that call brctl addif br0 br0 (e.g., 5152)
                 if iface != brif:
+                    if not isIfname(iface.strip()):
+                        skipped.append(c)
+                        continue
                     result.append(iface.strip())
+    _reportSkipped("bridge member", skipped)
     return result
 
 
@@ -311,12 +502,19 @@ def findVlanInfoForDev(data, dev):
     results = []
     candidates = filter(lambda l: l.startswith(b"register_vlan_dev"), lines)
     prog = re.compile(
-        rb"register_vlan_dev\[[^\]]+\]: dev:%s vlan_id:([0-9]+)" % dev.encode()
+        rb"register_vlan_dev\[[^\]]+\]: dev:%s vlan_id:([0-9]+)" % re.escape(dev.encode())
     )
+    skipped = []
     for c in candidates:
         g = prog.match(c)
         if g:
-            results.append(int(g.group(1)))
+            vid = g.group(1)
+            # length check first: int() refuses very long decimal strings
+            if len(vid) > 4 or int(vid) > MAX_VLAN_ID:
+                skipped.append(c)
+                continue
+            results.append(int(vid))
+    _reportSkipped("VLAN", skipped)
     return results
 
 
@@ -340,6 +538,25 @@ def placeholderPort(iid, i):
     image, so parallel emulations do not collide (was the fixed 2000-2003 on all
     interfaces). Same formula as SOCK_BASE in scripts/run.<arch>.sh."""
     return 20000 + (int(iid) % 10000) * 4 + i
+
+
+def forwardPorts(ports, warn=False):
+    """Ports for extra hostfwd rules: no 80/443 (always forwarded), only valid
+    ports, one rule per (proto, port), at most MAX_FORWARD_PORTS. The guest
+    controls the list; unbounded it would make one huge QEMU argument."""
+    result = []
+    seen = set()
+    for (proto, _addr, port) in ports:
+        if port in (80, 443) or not 1 <= port <= 65535 or (proto, port) in seen:
+            continue
+        if len(result) >= MAX_FORWARD_PORTS:
+            if warn:
+                print("[!] Warning: more than %d ports to forward; ignoring the rest"
+                      % MAX_FORWARD_PORTS)
+            break
+        seen.add((proto, port))
+        result.append((proto, port))
+    return result
 
 
 def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
@@ -366,9 +583,7 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
             # (explicit hostfwd rules are not affected); forwards listen on
             # loopback only, so the emulated web UI is not exposed to the LAN
             portfwd = "restrict=on,hostfwd=tcp:127.0.0.1:80-:80,hostfwd=tcp:127.0.0.1:443-:443,"
-            for (proto, ip, port) in ports:
-                if port in [80, 443]:
-                    continue
+            for (proto, port) in forwardPorts(ports):
                 portfwd += "hostfwd=%(TYPE)s:127.0.0.1:%(PORT)i-:%(PORT)i," % {
                     "TYPE": proto,
                     "PORT": port,
@@ -391,6 +606,9 @@ def qemuNetworkConfig(arch, network, isUserNetwork, ports, iid=0):
     interfaceNum = 4
     if arch == "arm" and checkVariable("FIRMAE_NET"):
         interfaceNum = 1
+
+    if isUserNetwork:
+        forwardPorts(ports, warn=True)      # only to report a truncation once
 
     for i in range(0, interfaceNum):
         for j, n in enumerate(network):
@@ -524,6 +742,42 @@ sudo tunctl -d ${TAPDEV_%(I)i}
     return "\n".join(output)
 
 
+def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue):
+    """Second line of defence: the parsers already drop bad records, but nothing
+    unchecked may ever be formatted into the root shell script."""
+    def bad(what, value):
+        raise UnsafeValue("refusing to put %s %r into run.sh" % (what, value))
+
+    if not _isInt(iid, 0, 2**31 - 1):
+        bad("IID", iid)
+    if network_type not in NETWORK_TYPES:
+        bad("network type", network_type)
+    if not isinstance(qemuInitValue, str) or not QEMU_INIT_RE.match(qemuInitValue):
+        bad("init", qemuInitValue)
+    if len(network) > MAX_NETWORKS:
+        bad("number of networks", len(network))
+    for n in network:
+        if not isinstance(n, tuple) or len(n) != 5:
+            bad("network entry", n)
+        (ip, dev, vlan, mac, brif) = n
+        if not isIpv4(ip):
+            bad("IP address", ip)
+        if not isIfname(dev):
+            bad("interface name", dev)
+        if not isIfname(brif):
+            bad("bridge name", brif)
+        if vlan is not None and not _isInt(vlan, 0, MAX_VLAN_ID):
+            bad("VLAN id", vlan)
+        if mac is not None and not (isinstance(mac, str) and MAC_RE.match(mac)):
+            bad("MAC address", mac)
+    for p in ports:
+        if not isinstance(p, tuple) or len(p) != 3:
+            bad("port entry", p)
+        (proto, addr, port) = p
+        if proto not in ("tcp", "udp") or not isIpv4(addr) or not _isInt(port, 1, 65535):
+            bad("port", p)
+
+
 def qemuCmd(
     iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork
 ):
@@ -544,6 +798,8 @@ def qemuCmd(
             raise Exception("You didn't specify a valid endianness")
     else:
         raise Exception("Unsupported architecture")
+
+    checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue)
 
     for (ip, dev, vlan, mac, brif) in network:
         network_bridge = brif
@@ -607,19 +863,21 @@ def getNetworkList(data, ifacesWithIps, macChanges):
         return pruned_network
 
 
-def readWithException(filePath):
-    fileData = ""
-    with open(filePath, "rb") as f:
-        while True:
-            try:
-                line = f.readline().decode()
-                if not line:
-                    break
-                fileData += line
-            except:
-                fileData += ""
-
-    return fileData
+def readWithException(filePath, limit=MAX_READ):
+    """Contents of an image file as bytes, byte for byte: they are written back
+    later. (This used to decode line by line and silently drop lines that were
+    not UTF-8, so the restored init script lost them.) A missing file reads as
+    b"" as before; a file larger than `limit` raises UnsafeImagePath, since a
+    truncated copy could not be restored."""
+    try:
+        f = openImageFile(filePath, "rb")
+    except FileNotFoundError:
+        return b""
+    with f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise UnsafeImagePath("%s is larger than %d bytes" % (filePath, limit))
+    return data
 
 
 def inferNetwork(iid, arch, endianness, init):
@@ -635,53 +893,69 @@ def inferNetwork(iid, arch, endianness, init):
     # through a symlink planted in the image (SECURITY.md S5). The last
     # component is not followed: `file -b` reports symlinks as such and those
     # take the preInit.sh branch below, as before.
-    initPath = resolve_in_root(targetDir + "/image", init, follow_final=False)
-    fileType = (
-        subprocess.check_output(["file", "-b", initPath])
-        .decode()
-        .strip()
-    )
-    print("[*] Infer test: %s (%s)" % (init, fileType))
+    #
+    # Policy for unsafe paths (the image has been written by the guest once an
+    # earlier init candidate ran): a redirected /firmadyne file means FirmAE's
+    # own files were tampered with -> UnsafeImagePath, makeNetwork stops. An
+    # init script that is not a regular file (or is huge) is a property of this
+    # candidate only -> it is skipped (None) and the next candidate is tried.
+    try:
+        initPath = resolve_in_root(targetDir + "/image", init, follow_final=False)
+        fileType = (
+            subprocess.check_output(["file", "-b", initPath])
+            .decode()
+            .strip()
+        )
+        print("[*] Infer test: %s (%s)" % (init, fileType))
 
-    with open(targetDir + "/image/firmadyne/network_type", "w") as out:
-        out.write("None")
+        with openImageFile(firmadyneFile(targetDir, "network_type"), "wb") as out:
+            out.write(b"None")
 
-    qemuInitValue = "rdinit=/firmadyne/preInit.sh"
-    if os.path.exists(targetDir + "/service"):
-        webService = open(targetDir + "/service").read().strip()
-    else:
-        webService = None
-    print("[*] web service: %s" % webService)
-    targetFile = ""
-    targetData = ""
-    out = None
-    if not init.endswith("preInit.sh"):  # rcS, preinit
-        if (
-            fileType.find("ELF") == -1 and fileType.find("symbolic link") == -1
-        ):  # maybe script
-            targetFile = initPath
-            targetData = readWithException(targetFile)
-            out = open(targetFile, "a")
-        # netgear R6200
-        elif fileType.find("ELF") != -1 or fileType.find("symbolic link") != -1:
-            qemuInitValue = qemuInitValue[2:]  # remove 'rd'
-            targetFile = targetDir + "/image/firmadyne/preInit.sh"
-            targetData = readWithException(targetFile)
-            out = open(targetFile, "a")
-            out.write(init + " &\n")
-    else:  # preInit.sh
-        out = open(targetDir + "/image/firmadyne/preInit.sh", "a")
+        qemuInitValue = "rdinit=/firmadyne/preInit.sh"
+        if os.path.exists(targetDir + "/service"):
+            with open(targetDir + "/service") as f:
+                webService = f.read().strip()
+        else:
+            webService = None
+        print("[*] web service: %s" % webService)
+        # targetFile: (path inside the image, host path) of the file whose
+        # original content targetData is written back by process()
+        targetFile = None
+        targetData = None
+        out = None
+        if not init.endswith("preInit.sh"):  # rcS, preinit
+            if (
+                fileType.find("ELF") == -1 and fileType.find("symbolic link") == -1
+            ):  # maybe script
+                try:
+                    path = imageFile(targetDir + "/image", init, expected=initPath)
+                    targetData = readWithException(path)
+                    out = openImageFile(path, "ab")
+                except (UnsafeImagePath, ValueError, OSError) as e:
+                    print("[!] Warning: skipping init %s: %s" % (init, e))
+                    return None
+                targetFile = (init, path)
+            # netgear R6200
+            elif fileType.find("ELF") != -1 or fileType.find("symbolic link") != -1:
+                qemuInitValue = qemuInitValue[2:]  # remove 'rd'
+                path = firmadyneFile(targetDir, "preInit.sh")
+                targetFile = ("/firmadyne/preInit.sh", path)
+                targetData = readWithException(path)
+                out = openImageFile(path, "ab")
+                out.write((init + " &\n").encode("utf-8", "surrogateescape"))
+        else:  # preInit.sh
+            out = openImageFile(firmadyneFile(targetDir, "preInit.sh"), "ab")
 
-    if out:
-        out.write("\n/firmadyne/network.sh &\n")
-        if webService:
-            out.write("/firmadyne/run_service.sh &\n")
-        out.write("/firmadyne/debug.sh\n")
-        # trendnet TEW-828DRU_1.0.7.2, etc...
-        out.write("/firmadyne/busybox sleep 36000\n")
-        out.close()
-
-    umountImage(targetDir, loopFile)
+        if out:
+            out.write(b"\n/firmadyne/network.sh &\n")
+            if webService:
+                out.write(b"/firmadyne/run_service.sh &\n")
+            out.write(b"/firmadyne/debug.sh\n")
+            # trendnet TEW-828DRU_1.0.7.2, etc...
+            out.write(b"/firmadyne/busybox sleep 36000\n")
+            out.close()
+    finally:
+        umountImage(targetDir, loopFile)
 
     print("Running firmware %d: terminating after %d secs..." % (iid, TIMEOUT))
 
@@ -695,12 +969,22 @@ def inferNetwork(iid, arch, endianness, init):
     print("[*] initial emulation ended (%s, exit %s)" % ("timeout" if timedOut else "exited", rc))
 
     loopFile = mountImage(targetDir)
-    if not os.path.exists(targetDir + "/image/firmadyne/nvram_files"):
-        print("Infer NVRAM default file!\n")
-        subprocess.call(["%s/inferDefault.py" % SCRIPTDIR, str(iid)])
-    umountImage(targetDir, loopFile)
+    try:
+        # inferDefault.py copies into /firmadyne/: a symlinked directory or a
+        # (dangling) symlink nvram_files would make that copy land on the host
+        if not os.path.exists(firmadyneFile(targetDir, "nvram_files")):
+            print("Infer NVRAM default file!\n")
+            # Optional improvement: a hang or failure here must not fail the
+            # stage. The whole process group is stopped (inferDefault runs `file`).
+            _, timedOut = run_with_timeout(
+                ["%s/inferDefault.py" % SCRIPTDIR, str(iid)], INFER_DEFAULT_TIMEOUT)
+            if timedOut:
+                print("[!] Warning: inferDefault.py timed out after %d s; "
+                      "continuing without NVRAM default files" % INFER_DEFAULT_TIMEOUT)
+    finally:
+        umountImage(targetDir, loopFile)
 
-    data = open("%s/qemu.initial.serial.log" % targetDir, "rb").read()
+    data = readLimited("%s/qemu.initial.serial.log" % targetDir)
 
     ports = findPorts(data, endianness)
 
@@ -823,18 +1107,30 @@ def checkNetwork(networkList):
     return filterNetworkList, result  # (network_type)
 
 
+def readWebFlag(path):
+    """True if the file written by check_emulation.sh says "true"."""
+    try:
+        with open(path) as f:
+            return f.read().strip() == "true"
+    except FileNotFoundError:
+        return False
+
+
 def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
     success = False
 
     global SCRIPTDIR
     global SCRATCHDIR
 
-    for init in open(SCRATCHDIR + "/" + str(iid) + "/init").read().split("\n")[:-1]:
+    with open(SCRATCHDIR + "/" + str(iid) + "/init") as f:
+        inits = f.read().split("\n")[:-1]
+    for init in inits:
         with open(SCRATCHDIR + "/" + str(iid) + "/current_init", "w") as out:
             out.write(init)
-        qemuInitValue, networkList, targetFile, targetData, ports = inferNetwork(
-            iid, arch, endianness, init
-        )
+        inferred = inferNetwork(iid, arch, endianness, init)
+        if inferred is None:  # unusable init candidate (see inferNetwork)
+            continue
+        qemuInitValue, networkList, targetFile, targetData, ports = inferred
 
         print("[*] ports: %r" % ports)
         # check network interfaces and add script in the file system
@@ -849,6 +1145,11 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
         # netgear WNDR3400v2-V1.0.0.54_1.0.82.zip - check only one IP
         # asus FW_RT_AC87U_300438250702
         # [('192.168.1.1', 'eth0', None, None), ('169.254.39.3', 'eth1', None, None), ('169.254.39.1', 'eth2', None, None), ('169.254.39.166', 'eth3', None, None)]
+
+        if len(filterNetworkList) > MAX_NETWORKS:
+            print("[!] Warning: %d networks found; only the first %d are used"
+                  % (len(filterNetworkList), MAX_NETWORKS))
+            filterNetworkList = filterNetworkList[:MAX_NETWORKS]
 
         if filterNetworkList:
             ips = [ip for (ip, dev, vlan, mac, brif) in filterNetworkList]
@@ -892,21 +1193,27 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
             # not os.system(): that ignores SIGINT while it waits
             subprocess.call(["./scripts/check_emulation.sh", str(iid), arch + endianness])
 
-            if (
-                os.path.exists(SCRATCHDIR + "/" + str(iid) + "/web")
-                and open(SCRATCHDIR + "/" + str(iid) + "/web").read().strip() == "true"
-            ):
+            if readWebFlag(SCRATCHDIR + "/" + str(iid) + "/web"):
                 success = True
                 break
 
         # restore infer network data
-        # targetData is '' when init is preInit.sh
-        if targetData != "":
+        # targetFile is None when init is preInit.sh; an empty original is not
+        # written back (as before)
+        if targetFile and targetData:
             targetDir = SCRATCHDIR + "/" + str(iid)
             loopFile = mountImage(targetDir)
-            with open(targetFile, "w") as out:
-                out.write(targetData)
-            umountImage(targetDir, loopFile)
+            try:
+                # the guest ran in between: re-check that the path still leads
+                # to the same regular file inside the image
+                (relPath, hostPath) = targetFile
+                path = imageFile(targetDir + "/image", relPath, expected=hostPath)
+                with openImageFile(path, "wb") as out:
+                    out.write(targetData)
+            except (UnsafeImagePath, ValueError) as e:
+                print("[!] Warning: not restoring %s: %s" % (relPath, e))
+            finally:
+                umountImage(targetDir, loopFile)
 
     return success
 
@@ -956,7 +1263,7 @@ def main():
         if k == "-d":
             global debug
             debug += 1
-        if k == "-q":
+        if k == "-q":  # accepted for compatibility (pipeline.py passes it); no effect
             makeQemuCmd = True
         if k == "-i":
             iid = int(v)
@@ -970,7 +1277,11 @@ def main():
             "Either arch or endianness not found try mipsel/mipseb/armel/armeb"
         )
 
-    if outfile and iid:
+    if iid is None:
+        raise Exception("No image id given (-i)")
+    # `iid` alone was false for image 0: outfile stayed True and open(True)
+    # wrote run.sh to file descriptor 1
+    if outfile:
         outfile = """%s/%i/run.sh""" % (SCRATCHDIR, iid)
     if debug:
         print("processing %i" % iid)

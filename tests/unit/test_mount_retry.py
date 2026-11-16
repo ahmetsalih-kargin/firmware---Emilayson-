@@ -30,7 +30,8 @@ def test_transient_mount_failures_are_retried(fake):
     results[:] = [32, 32, 0]
     assert mn.mountImage("/w/scratch/1") == "/dev/loop9p1"
     assert [c[0] for c in calls] == ["mount"] * 3
-    assert calls[0] == ["mount", "/dev/loop9p1", "/w/scratch/1/image"]
+    # nodev,nosuid: device nodes / setuid files from the image stay inert on the host
+    assert calls[0] == ["mount", "-o", "nodev,nosuid", "/dev/loop9p1", "/w/scratch/1/image"]
 
 
 def test_a_persistent_mount_failure_is_raised_after_five_attempts(fake, capsys):

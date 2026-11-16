@@ -100,6 +100,22 @@ DEVICE=`add_partition "${WORK_DIR}/image.raw"`
 IMAGE_ATTACHED=true
 mount_partition ${DEVICE} ${WORK_DIR}/image > /dev/null
 
+# The guest wrote this file system during earlier runs and the writes below run
+# as root on the host: refuse a symlinked /firmadyne and any target that is not
+# a regular file (a symlink, FIFO or device node would redirect the write).
+GUEST_DIR=${WORK_DIR}/image/firmadyne
+if [ -L "${GUEST_DIR}" ] || [ ! -d "${GUEST_DIR}" ]; then
+    echo "Error: ${GUEST_DIR} is not a plain directory" >&2
+    exit 1
+fi
+for GUEST_FILE in network_type net_bridge net_interface debug.sh; do
+    GUEST_FILE=${GUEST_DIR}/${GUEST_FILE}
+    if [ -L "${GUEST_FILE}" ] || { [ -e "${GUEST_FILE}" ] && [ ! -f "${GUEST_FILE}" ]; }; then
+        echo "Error: ${GUEST_FILE} is not a regular file" >&2
+        exit 1
+    fi
+done
+
 echo "normal" > ${WORK_DIR}/image/firmadyne/network_type
 echo "br0" > ${WORK_DIR}/image/firmadyne/net_bridge
 echo "eth0" > ${WORK_DIR}/image/firmadyne/net_interface
