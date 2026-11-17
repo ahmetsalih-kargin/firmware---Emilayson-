@@ -21,6 +21,17 @@ pytestmark = pytest.mark.linux
 
 IID = "987654"
 
+
+def proc_gone(pid):
+    """True if the process is gone or a zombie. It can be reaped between any two
+    steps, so a vanished/empty/truncated /proc/<pid>/stat means "gone" too."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().split(")")[-1].split()[0] == "Z"
+    except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+        return True
+
+
 STUBS = {
     "sources/extractor/extractor.py": """#!/bin/bash
 echo "$@" >> "$PROJECT/extractor_calls"
@@ -365,7 +376,7 @@ def test_a_hanging_stage_is_stopped_and_reports_timeout(project, monkeypatch):
     assert "hanging now" in out
     child = int((project / "child_pid").read_text())
     for _ in range(50):                                            # killed with its group
-        if not os.path.exists("/proc/%d" % child) or open("/proc/%d/stat" % child).read().split(")")[-1].split()[0] == "Z":
+        if proc_gone(child):
             break
         time.sleep(0.1)
     else:

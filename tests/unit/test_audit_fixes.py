@@ -115,7 +115,9 @@ def test_normal_exit_leaves_no_background_process_behind(tmp_path):
             with open("/proc/%d/stat" % pid) as f:
                 if f.read().split(")")[-1].split()[0] == "Z":
                     break
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+            # reaped while /proc/<pid>/stat was being opened or read
+            # (ENOENT / ESRCH / empty or truncated content): the process is gone
             break
         time.sleep(0.1)
     else:

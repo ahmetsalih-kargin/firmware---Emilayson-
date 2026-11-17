@@ -22,7 +22,7 @@ from firmae.log import Reporter
 from firmae.pipeline import Pipeline
 
 # the helpers of test_pipeline.py (tests/unit is on sys.path: no __init__.py)
-from test_pipeline import IID, STUBS, fw, project, run  # noqa: F401
+from test_pipeline import IID, STUBS, fw, project, proc_gone, run  # noqa: F401
 
 pytestmark = pytest.mark.linux
 
@@ -592,7 +592,7 @@ def test_keyboard_interrupt_during_the_cli_stops_its_process_group(hw, monkeypat
         pipe.run_firmware(fw(hw))
     pid = int((hw / "hw_pid").read_text())
     for _ in range(50):
-        if not os.path.exists("/proc/%d" % pid) or open("/proc/%d/stat" % pid).read().split(")")[-1].split()[0] == "Z":
+        if proc_gone(pid):
             break
         time.sleep(0.1)
     else:

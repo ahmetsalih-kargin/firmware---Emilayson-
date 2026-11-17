@@ -42,8 +42,8 @@ def alive(pid):
     try:
         with open("/proc/%d/stat" % pid) as f:
             return f.read().split(")")[-1].split()[0] != "Z"
-    except FileNotFoundError:
-        return False
+    except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+        return False   # gone, or reaped while /proc/<pid>/stat was read (empty/truncated)
 
 
 @pytest.fixture
