@@ -527,3 +527,108 @@ fark (önceki commit'e göre) şablondaki 16 satırlık denetim bloğu
   hiç başlanmadı.
 - Eşzamanlı çalıştırma kilidi birim testlerle (gerçek `flock` tutan ayrı süreç) denendi;
   iki gerçek emülasyonun aynı anda koşturulması doğrulanmadı.
+
+## Faz 6.1 — donanım profili (2026-11-17)
+
+> Değişiklikler: `CHANGELOG.md` "Phase 6.1"; yüzey ve bulgular: `SECURITY.md` S26; tasarım:
+> `ARCHITECTURE.md` 9.2. Aşağıdaki sayıların hepsi ölçülmüştür; ölçülmeyen her şey sonda
+> "Doğrulanmayanlar" altında listelidir.
+
+### A) Birim testleri
+
+WSL2 Ubuntu, Python 3.12.3: **428 → 769 test, hepsi geçiyor.** Python 3.8 ile **koşulmadı**.
+Yeni dosyalar: `test_hwprofile.py` (204 test), `test_hwserial.py` (62),
+`test_pipeline_hwprofile.py` ve `test_hwprofile_integration.py` (gerçek
+`python3 -m firmae.hwprofile` ile bütünleşme).
+
+**Bilinen kararsız test:** `tests/unit/test_audit_fixes.py::test_normal_exit_leaves_no_background_process_behind`
+tam takımda ara sıra kalıyor (`/proc/<pid>/stat` okunurken `ProcessLookupError`; test içi
+yarış, satır ~116). Bu değişiklikle ilgisiz; **düzeltilmedi.**
+
+### B) Bağımsız denetim ve düzeltme sonrası ölçümler
+
+Sıfır bağlamlı ayrı bir denetçi profilleyiciyi inceledi. Bulgular ve düzeltme öncesi/sonrası ölçümler:
+
+| Bulgu | Önce | Sonra |
+|---|---|---|
+| Sparse başlıklı tarball (2 MB girdi) | 3,93 GB RSS, `MemoryError`, profil yok | 27 MB, 0,2 s, çıkış 0, profil yazıldı |
+| Aynı girdi, yapısal önlem kapalı, yalnız `RLIMIT_AS` (1536 MB) | — | 1,53 GB'ta durdu, 21 s, çıkış 0, `limits_hit` "memory" |
+| xz sözlük bombası (610 KB girdi) | 2,1 GB (denetçi ölçümü 3,1 GB) | 17 MB, 0,04 s |
+| İç içe pax zinciri (14 KB) | `RecursionError`/traceback, çıkış 1 | kısmi profil, çıkış 0 |
+| Global pax başlıkları (3×600k anahtar) | — | 17 MB |
+| İlk 5 örnek yüzünden kaçan modül hataları | watchdog/i2c "not-referenced" | "failing" (`dynamic.modules` sayaçları) |
+| Profil boyutu | 6,27 MiB | 1,08 MiB |
+
+Seri log: yalnız satırsonlu 64 MiB log 0,2 s (denetçinin eski ölçümü: 2×64 MiB için 120,8 s);
+`\r\n` ile 1,4 s; tipik log 2,9 s; 8 MiB düşmanca satır 0,03 s. Yanlış pozitif satırlar
+("gpio-keys: no error", "0 errors", "error_count=0") artık sayılmıyor; tek çökmenin çift
+sayımı giderildi.
+
+**Denetimde sorun bulunmayanlar:** diske yazma/yol geçişi yok; çıktı `O_EXCL|O_NOFOLLOW` +
+`os.replace`; terminal çıktısı beyaz listeli; düzenli ifadeler 6-10 MiB düşmanca girdide
+≤ 0,30 s; gzip/bz2 bombası akış sınırında duruyor.
+
+**AÇIK:** düzeltmeler ikinci bir bağımsız denetimden **geçmedi.** Belgelenmiş kısıt: gerçek
+firmadyne iz satırı biçimini birebir taklit eden bir guest genel hata türlerini (aygıt açma,
+no such device, mtd, watchdog, gpio) gizleyebilir; panic/segfault/modül hataları
+gizlenemez. Eski GNU 'S' sparse için bellek ölçümü yalnızca birim testiyle yapıldı.
+
+### C) Gerçek emülasyon (iki tur)
+
+**Tur 1** (düzeltme öncesi kod, `results/20261117-002109`): A exit 0, 452 s; B exit 0, 406 s;
+F exit 10/10 (3 s ve 175 s); G exit 0, 444 s. C kesildi: 30 s sonra tüm sayaçlar 0. H: Ctrl-C
+öncesi TAP=2, QEMU=1, güvenlik duvarı kuralı=4, `/tmp` soketi=2; 30 s sonra hepsi 0.
+`FIRMAE_HWPROFILE=0` (`results/20261117-010010`): B exit 0, 402 s, profil dosyası ve `[hw]`
+satırı yok, sonuçlar aynı; F 10/10.
+
+**Tur 2** (düzeltme SONRASI kod, `results/20261117-011518`): A exit 0, 450 s; B exit 0, 402 s;
+C ve H aynı; tüm bitiş sayaçları (LOOP/MOUNT/TAP/QEMU/ZOMBIE/ORPHAN/TMPSOCK/TMPDIR/FWRULES)
+0; sentinel QEMU'lar hayatta. A/B için `result`/`ping`/`web`/`ip`/`architecture` ve üretilen
+`run.sh`, önceki güvenlik turuyla (`20261116-181217`; A 406 s, B 381 s, G 386 s) birebir aynı.
+
+**Süre farkı profil adımına atfedilemez:** profil adımları toplam ≈ 1,7 s (A: statik 1,6 +
+dinamik 0,1; B: 0,9 + 0,0); profil kapalıyken de B 402 s; profile hiç ulaşmayan F de uzadı.
+Bu ortam gürültüsüdür (kanıtlanmış bir neden yok). F, G ve `FIRMAE_HWPROFILE=0` Tur 2'de
+yeniden **koşulmadı**; `FIRMAE_HWPROFILE=0` ile A hiç koşulmadı.
+
+**Ağ-hatası yolu** (`results/20261117-013912`, B, `FIRMAE_TIMEOUT_NETWORK=60`): çıkış 124, 76 s;
+hata sonrası dinamik profil adımı çalıştı, `dynamic` dolu (tek log, 713 satır), `[hw]` satırı
+basıldı, bitişte tüm sayaçlar 0.
+
+**Ctrl-C (C, H):** kesmeden +5 s ve +30 s sonra `firmae.hwprofile` süreci yok; profil yalnız
+statik kaldı (`hwprofile.log`: dynamic=no).
+
+### D) Profil sonuçları (Tur 2)
+
+| Firmware | failing | covered / referenced | not-referenced | Profil |
+|---|---|---|---|---|
+| DIR-868L (ARM) | gpio (sysfs "cannot create duplicate filename '/class/gpio'", gpio_error); nvram (`/dev/nvram: No such device`; iki log toplamı 293, ham loglarda 147+145: 1'lik fark **incelenmedi**); mtd (`/dev/mtdblock/4` mount hatası) | uart covered; wlan, other referenced | watchdog, led, i2c, spi | 28 499 bayt |
+| WNAP320 (MIPS) | watchdog (açma hatası; iki logda 3+2); mtd ("Error Writing device /dev/mtd5") | uart covered; led, wlan, other referenced | gpio, nvram, i2c, spi | 18 672 bayt |
+
+DIR-868L `dynamic.modules`: `nf_conntrack_proto_gre.ko` ve `nf_nat_proto_gre.ko` (2'şer
+hata). WNAP320: modül listesi boş; segfault iki logda 1+1.
+
+Basılan özet satırları:
+
+```
+A: [hw] gpio=failing nvram=failing mtd=failing watchdog=not-referenced i2c=not-referenced spi=not-referenced led=not-referenced uart=covered wlan=referenced other=referenced (scratch/1/hw_profile.json)
+B: [hw] watchdog=failing mtd=failing gpio=not-referenced nvram=not-referenced i2c=not-referenced spi=not-referenced led=referenced uart=covered wlan=referenced other=referenced (scratch/1/hw_profile.json)
+```
+
+**Yorum notları:**
+
+1. Sayaçlar ilk ve son emülasyonun seri loglarının **toplamıdır**; tek koşudaki olay sayısı değildir.
+2. nvram ve mtd, FirmAE'nin kendi mekanizması olan sınıflar olmasına rağmen çalışma zamanı
+   hatası görüldüğü için "failing"dir; bu, emülasyonun başarısız olduğu anlamına gelmez (iki
+   firmware'de de `result`/`ping`/`web` = true).
+3. Örneklem yalnız iki firmware: I2C/SPI için sonuç "bu iki firmware'de iz yok"tur, genelleme değildir.
+4. Profil dosyası 0640, `hwprofile.log` 0644.
+
+### E) Doğrulanmayanlar
+
+- Python 3.8.
+- Düzeltmeler için ikinci bağımsız denetim.
+- analyze/debug/run/boot modlarında profil adımı.
+- Docker modu.
+- Daha geniş firmware seti.
+- Kernel gpio/watchdog kanca kayıt hatalarının nedeni.

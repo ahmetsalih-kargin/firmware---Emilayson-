@@ -76,6 +76,18 @@ the same firmware or image and this one was skipped). Stage time limits can be c
 limit); the database password is read from `FIRMAE_DB_PASSWORD` (default unchanged). Details
 and behaviour changes: `CHANGELOG.md`.
 
+Hardware profile (informational, never changes the result or the exit code): before the
+image is built and after the network inference, `firmae.hwprofile` records which peripherals
+(GPIO, watchdog, NVRAM, I2C, SPI, ...) the firmware references and which ones failed in the
+serial log, in `scratch/<IID>/hw_profile.json` (log: `hwprofile.log`), and the run prints one
+`[hw] gpio=failing ... (path)` line. `FIRMAE_HWPROFILE=0` switches it off;
+`FIRMAE_TIMEOUT_HWPROFILE` sets its time limit in seconds (default 300, 0 = no limit; the
+profiler itself always gets a budget of 80% of it, or 240 s without a limit; all
+`FIRMAE_TIMEOUT_*` are capped at 7 days). The serial-log step also runs when network
+inference failed. A profile from an earlier run is deleted first, and a corrupt profile gives
+`[hw] profil okunamadı (...)` instead of a summary. Not yet verified in a real emulation run; no peripheral is emulated by it. See
+`ARCHITECTURE.md` section 9.
+
 ## Debug
 
 After `run.sh -c` finished.

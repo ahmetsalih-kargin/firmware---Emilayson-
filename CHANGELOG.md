@@ -6,6 +6,70 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 6.1 — hardware profile (2026-11-16)
+
+A new, purely informational pipeline step that records which peripherals a firmware
+references and which of them failed in the serial log. Unit-tested (stub CLI, synthetic
+input, real CLI on a synthetic tarball) and exercised in real emulation runs of two
+firmwares (DIR-868L ARM, WNAP320 MIPS).
+
+- **Real-run validation:** TEST_REPORT.md ("Faz 6.1 — donanım profili"). Not covered there:
+  Python 3.8, a second independent audit, analyze/debug/run/boot modes, Docker mode.
+
+- **New step `hwprofile`** (`firmae/pipeline.py`, `_hwprofile_static`): after architecture
+  detection and before `tar2db`/`makeImage`, runs
+  `python3 -m firmae.hwprofile --tar images/<IID>.tar.gz --out scratch/<IID>/hw_profile.json`.
+- **New step `hwprofile-dynamic`** (`_hwprofile_dynamic`): after `makeNetwork.py`, runs
+  `... --update --out ... --serial-log qemu.initial.serial.log --serial-log qemu.final.serial.log`
+  (only the logs that exist; skipped when there is none or no static profile).
+- **Never fatal:** a failing CLI, a timeout or a missing `firmae.hwprofile` module only
+  produces a `[*]` line and `scratch/<IID>/hwprofile.log`; the exit code, `result` and the
+  `time_*` files of the run are unchanged. Only `Exception` is caught, so Ctrl-C and SIGTERM
+  still propagate (the CLI runs through `scripts.procgroup.run_with_timeout`, which stops its
+  process group first). Check mode that skips emulation (earlier success) leaves an existing
+  profile untouched.
+- **Behaviour change:** one extra summary line at the end of a run that wrote a profile, e.g.
+  `[hw] gpio=failing watchdog=failing nvram=covered i2c=not-referenced spi=not-referenced (scratch/1/hw_profile.json)`.
+  The file is untrusted: it is opened with `O_NOFOLLOW`, read up to 8 MiB, a broken one gives a
+  fixed warning line, and only known peripheral names and known status values are printed
+  (`unsupported` and `failing` first).
+- **New environment variables:** `FIRMAE_HWPROFILE=0` switches both steps off;
+  `FIRMAE_TIMEOUT_HWPROFILE` (default 300 s, 0 = no limit, validated like the other
+  `FIRMAE_TIMEOUT_*`); the CLI gets `--timeout` = 80% of the value (see the audit entry below).
+- **After the independent audit (2026-11-17), pipeline side:**
+  - **Behaviour change:** the dynamic step also runs when the network step failed or timed out
+    (the initial serial log is then the most useful evidence). It runs in `run_firmware`'s
+    `finally`, after `release_emulation` (QEMU gone, logs final; the release does not delete
+    them) and before the image lock is dropped. The original exit code and message are kept;
+    on Ctrl-C/SIGTERM it does not run.
+  - **Behaviour change:** an old `hw_profile.json` (file or symlink itself, never its target)
+    is removed before the static step; if that step does not exit 0, the dynamic step and the
+    summary are skipped, so a stale profile is neither updated nor summarised.
+  - **Behaviour change:** the CLI's `--timeout` is 80% of the outer limit (at least 1 s; was
+    limit-30, at least 30, which exceeded the outer limit below 60 s); with no outer limit
+    (`FIRMAE_TIMEOUT_HWPROFILE=0`) `--timeout 240` is passed (was: none).
+  - `stage_timeout`: a very long `FIRMAE_TIMEOUT_*` value (thousands of digits) no longer raises
+    an unhandled `ValueError` (treated as not set); upper bound 7 days for all stages.
+  - The summary reads up to 8 MiB (was 4) and prints the fixed line
+    `[hw] profil okunamadı (scratch/<IID>/hw_profile.json)` for an oversized or corrupt profile
+    instead of nothing.
+  - Contract of the profiler CLI (documented, no pipeline code change): new option
+    `--mem-limit-mb` (default inside the CLI; the pipeline does not pass it), new field
+    `dynamic.modules`.
+  - Tests: new `tests/unit/test_hwprofile_integration.py` (real `python3 -m firmae.hwprofile`
+    on a synthetic tarball and a recorded serial log); `test_pipeline_hwprofile.py` extended.
+- **SECURITY.md:** S26 (attack surface of the profiler), updated with the audit findings.
+- **Documentation:** `ARCHITECTURE.md` section 9 corrected: libnvram replaces the firmware's own
+  nvram API symbols and does not intercept libc `open`/`ioctl`; the instrumented, downloaded
+  kernel (not this repository) does the `LD_PRELOAD`, so a second preload library needs a kernel
+  change or another loading path; stale line references fixed; `/firmadyne/strace` is copied
+  into the image but never called. Exploration findings (two firmwares: DIR-868L ARM, WNAP320
+  MIPS) recorded with their limits.
+- **Tests:** `tests/unit/test_pipeline_hwprofile.py` (new). `tests/unit/test_pipeline.py` sets
+  `FIRMAE_HWPROFILE=0` in its fixture so its stub tree does not start the profiler.
+- **Not done:** `strace`-based dynamic tracing (6.2), a report over the Phase 0 set (6.3), `libhwmock`
+  (6.4), the kernel hook registration errors (`Cannot register character device`).
+
 ### Second hardening pass (2026-11-16)
 
 Two rounds of parallel fixes plus an independent review (see `TEST_REPORT.md`, last section).

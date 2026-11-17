@@ -292,45 +292,154 @@ içeriği tek satırlık bir çağrı olur: `exec python3 -m firmae emulate <IID
 |---|---|---|
 | QEMU yerleşik | UART (malta 16550; virt PL011 — FirmAE kernel'inde `ttyS`, major 4 / minor 64 olarak kayıtlı), IDE/virtio disk, e1000/virtio NIC, RTC | QEMU, `FirmAE_kernel-v4.1/drivers/tty/serial/amba-pl011.c` |
 | Kernel `firmadyne` modülü (`devfs=1`) | 12 stub: `/dev/acos_nat_cli`, `brcmboard`, `dsl_cpe_api`, `gpio`, `nvram`, `pib`, `sc_led`, `tca0`, `ticfg`, `watchdog`, `wdt`, `zybtnio` — `open/write/ioctl` başarılı, `read` → `"0\0"` | `FirmAE_kernel-v4.1/drivers/firmadyne/devfs_stubs.c` (bu repoda değil) |
-| Kernel `nandsim` | MTD (boş NAND) | `makeNetwork.py:85` |
-| LD_PRELOAD `libnvram` | NVRAM key/value | `sources/libnvram` |
+| Kernel `nandsim` | MTD (boş NAND) | `nandsim.parts=...` kernel komut satırı, `scripts/makeNetwork.py` içindeki `run.sh` şablonu (~satır 300; eski "satır 85" referansı yanlıştı) |
+| `libnvram` (LD_PRELOAD ile yüklenir) | NVRAM key/value. **libc `open`/`ioctl` çağrılarını YAKALAMAZ**: firmware'in kendi nvram API sembollerinin (`nvram_get`, `nvram_set`, ... ve `alias.c`'deki takma adlar) yerine geçer. Bu yüzden `/dev/nvram` açmaya çalışan bir ikili bu kütüphaneden etkilenmez | `sources/libnvram/nvram.c`, `alias.c` |
 | Dosya tabanlı düğümler | `/dev/gpio/in`, `/dev/mtd*` düğümleri | `scripts/fixImage.sh` |
 | **Yok** | I2C (`/dev/i2c-*`), SPI (`/dev/spidev*`), `gpiochip` (karakter cihaz API), vendor'a özgü diğer düğümler | — |
+
+**LD_PRELOAD'ı bu depo yüklemez.** `libnvram.so`'yu `LD_PRELOAD` ile yükleyen, indirilen
+hazır **enstrümante kernel**'dir (`init/main.c` değişikliği; `sources/libnvram/README.md:48-49`).
+Bu repoda o kodu değiştirmek mümkün değil; dolayısıyla ikinci bir preload kütüphanesi
+(`libhwmock`, bkz. 9.2) kernel değişikliği ya da başka bir yükleme yolu (ör. imajdaki
+`/etc/ld.so.preload`, init sarmalayıcısı) gerektirebilir; hangisinin çalıştığı **denenmedi**.
+
+**Kullanılmayan bileşen:** `strace` ikilileri `firmae.config:28` (`BINARIES`) üzerinden
+`makeImage.sh` tarafından imaja `/firmadyne/strace` olarak kopyalanır, ancak depodaki hiçbir
+script onu çağırmaz (`grep` ile doğrulandı; yalnızca `download.sh` indirir). Dinamik izleme
+için hazır bir altyapı yoktur; yalnızca ikili hazırdır.
 
 Kalan belirsizlik: ARM `virt` makinesinde ikinci UART (ttyS1 → `/tmp/qemu.IID.S1`) olup
 olmadığı — WSL2'de dinamik test ile doğrulanacak.
 
-### 9.2 Önerilen yaklaşım: önce ölç, sonra yalnızca gerekeni taklit et
+### 9.2 Donanım profili: önce ölç, sonra yalnızca gerekeni taklit et
+
+> **Durum (2026-11-17):** 9.2.1 (statik profil + seri log kanıtı) `firmae/hwprofile.py`,
+> `firmae/hwserial.py` (profil üreticisi ve seri log ayrıştırıcısı) ile `firmae/pipeline.py`
+> (boru hattı bağlantısı) üzerinden eklendi ve **iki firmware (DIR-868L ARM, WNAP320 MIPS) ile
+> gerçek emülasyon koşusunda doğrulandı** (ölçümler: TEST_REPORT.md "Faz 6.1"). Doğrulanmayanlar:
+> Python 3.8, ikinci bağımsız denetim, analyze/debug/run/boot ve Docker modları, daha geniş
+> firmware seti. Strace ile dinamik izleme ve `libhwmock` (9.2.3) **yapılmadı.**
+
+#### 9.2.1 Profil akışı (uygulandı, iki firmware ile gerçek koşuda doğrulandı)
 
 ```
-            ┌─────────────── hwprofile.py ────────────────┐
- rootfs ──► │ statik: ELF'lerde "/dev/..." dizgileri,      │
-            │         .ko listesi, init script'lerinde      │──► scratch/IID/hw_profile.json
- guest  ──► │ dinamik (profil modu): web servisi            │
-            │         /firmadyne/strace -f -e open,ioctl    │
-            └──────────────────────────────────────────────┘
-                              │ her cihaz için sınıf:
-     covered:kernel-stub | covered:nandsim | covered:libnvram | covered:file-node |
-     covered:qemu | UNSUPPORTED (+ erişen binary, hata kodu)
+ images/IID.tar.gz ──► [1] statik tarama (hwprofile --tar)      ┐
+   (diske açılmaz)         /dev/..., .ko, ioctl/bus dizgileri    │
+                                                                 ├─► scratch/IID/hw_profile.json
+ qemu.initial.serial.log ┐                                       │
+ qemu.final.serial.log   ┴► [2] seri log kanıtı                  │
+   (makeNetwork sonrası)      (hwprofile --update --serial-log)  ┘
+                                                  özet: "[hw] gpio=failing ..." (tek satır)
 ```
 
-- **Statik analiz firmware kodunu çalıştırmaz** (yalnızca bayt okuma).
-- Dinamik kısım repoda zaten bulunan `strace` binary'sini kullanır (`firmae.config:25`);
-  yeni bağımlılık yok. Yalnızca ayrı bir "profil" modunda çalışır; normal analizi
-  yavaşlatmaz.
-- Sonuç raporu her `UNSUPPORTED` cihazı açıkça listeler; emülasyon "başarılı" olsa bile.
+`firmae/pipeline.py` iki adım ekler; ikisi de **yalnızca bilgi amaçlıdır**:
+
+1. **`hwprofile`** (`_hwprofile_static`): mimari tespitinden sonra, `tar2db`/`makeImage`'den
+   önce: `python3 -m firmae.hwprofile --tar images/<IID>.tar.gz --out scratch/<IID>/hw_profile.json
+   --timeout <iç süre>`. Tarball taranır (üye adları yol olarak kullanılmaz, dosya diske açılmaz).
+   Adımdan **önce** önceki koşudan kalan `hw_profile.json` silinir (yalnızca düzenli dosya ya da
+   symlink'in kendisi; hedefine dokunulmaz). Adım 0 dönmezse (hata/zaman aşımı) dinamik adım ve
+   özet bu koşuda atlanır: bayat bir profil güncellenmez ya da özetlenmez.
+2. **`hwprofile-dynamic`** (`_hwprofile_dynamic`): `makeNetwork.py` bittikten sonra:
+   `... --update --out ... --serial-log qemu.initial.serial.log --serial-log qemu.final.serial.log`.
+   Yalnızca var olan loglar verilir; hiçbiri yoksa ya da statik adım başarılı değilse adım atlanır.
+   `--update` statik bölümü korur, yalnızca seri log (dinamik) bölümünü yeniler.
+   **Ağ çıkarımı başarısız ya da zaman aşımına uğradıysa da çalışır** (tanı değeri en yüksek
+   olan `qemu.initial.serial.log` o durumda da vardır): `run_firmware`'ın `finally` bloğunda,
+   `release_emulation`'dan **sonra** (QEMU durmuştur, log nihaidir; `release_emulation` seri
+   logları silmez, yalnızca `run/*.sock` ve `/tmp/qemu.*` dosyalarını), ama imaj kilidi hâlâ
+   tutulurken. Asıl çıkış kodu/hata mesajı aynen korunur. Yalnızca `FirmAEError` yolunda
+   çalışır: Ctrl-C/SIGTERM'de ek iş yapılmaz.
+
+Ortak kurallar:
+
+- **Profil emülasyon sonucunu etkilemez.** CLI'nin başarısızlığı, zaman aşımı ya da
+  `firmae.hwprofile` modülünün bulunmaması koşuyu durdurmaz, çıkış kodunu değiştirmez; yalnızca
+  bir `[*]` uyarı satırı ve `scratch/<IID>/hwprofile.log` kalır. Yalnızca `Exception` yakalanır;
+  `KeyboardInterrupt` ve SIGTERM'den gelen `SystemExit` yutulmaz (süreç grubunu
+  `scripts.procgroup.run_with_timeout` durdurur).
+- `FIRMAE_HWPROFILE=0` iki adımı kapatır (varsayılan açık). `FIRMAE_TIMEOUT_HWPROFILE`
+  (varsayılan 300 sn, 0 = sınırsız) dış zaman aşımıdır; CLI'ye `--timeout` olarak dış sınırın
+  %80'i (en az 1 sn) verilir, böylece süreç öldürülmeden kısmi sonucu yazabilir. Dış sınır 0
+  (sınırsız) ise `--timeout 240` geçirilir: profil adımı hiçbir zaman süresiz kalmaz. Tüm
+  `FIRMAE_TIMEOUT_*` değerleri için üst sınır 7 gündür; geçersiz (ya da 12'den çok anlamlı
+  haneli) değer "ayarlanmamış" sayılır, işlenmemiş istisna oluşmaz. CLI'nin kendi bellek
+  sınırı `--mem-limit-mb` (varsayılanı CLI içindedir; boru hattı geçirmez).
+- Check modunda önceki başarılı sonuç yüzünden emülasyon atlanıyorsa mevcut profil dosyasına
+  dokunulmaz; `web` zaten başarılıysa (emülasyon yeniden yapılmıyorsa) adımlar çalışmaz.
+- Koşu sonunda profil okunabiliyorsa **tek satır** özet basılır (`[hw] gpio=failing
+  watchdog=failing nvram=covered i2c=not-referenced ... (scratch/<IID>/hw_profile.json)`);
+  `unsupported`/`failing` önce yazılır. Dosya güvenilmez sayılır (`O_NOFOLLOW`, en çok 8 MiB;
+  CLI profili ≤ 2 MiB ile sınırlar): yalnızca bilinen anahtarlar ve bilinen `status` değerleri
+  basılır. Sınır aşılırsa ya da JSON/yapı bozuksa satır sessizce kaybolmaz; sabit metinli
+  `[hw] profil okunamadı (scratch/<IID>/hw_profile.json)` uyarısı basılır (dosyadan gelen hiçbir
+  dize basılmaz).
+
+**Şema özeti** (`hw_profile.json`, CLI sözleşmesi): üst anahtarlar `schema`, `static`, `dynamic`,
+`peripherals`, `notes`; `dynamic.modules` (seri logda görülen modül bilgisi) eklendi. `peripherals` altında `i2c`, `spi`, `gpio`, `watchdog`, `led`, `mtd`,
+`nvram`, `uart`, `wlan`, `other` anahtarlarının her biri `{status, evidence}` taşır.
+
+**Yorum notları** (gerçek koşulardan; TEST_REPORT.md "Faz 6.1" D):
+
+- Dinamik sayaçlar, ilk ve son emülasyonun seri loglarının **toplamıdır**; tek koşudaki olay
+  sayısı değildir (log başına ayrı raporlama henüz yok).
+- `nvram` ve `mtd` FirmAE'nin kendi mekanizması olan sınıflardır; yine de çalışma zamanında
+  hata görüldüğü için `failing` olabilirler. Bu emülasyonun başarısız olduğu anlamına gelmez:
+  iki firmware'de de `result`/`ping`/`web` = true idi.
+
+**`status` sözlüğü**
+
+| status | Anlamı |
+|---|---|
+| `not-referenced` | Firmware içinde bu sınıfa ait iz bulunmadı |
+| `referenced` | İz var (dizge, `.ko`, düğüm); çalışma zamanında sorun görülmedi ya da hiç gözlenmedi |
+| `failing` | Seri logda açma/ioctl/kayıt hatası görüldü (ör. `No such device`, `Cannot register character device`) |
+| `covered` | Mevcut katmanlardan biri (kernel stub, nandsim, libnvram, dosya düğümü, QEMU) karşılıyor |
+| `unsupported` | Kullanılıyor ama bu mimaride karşılayan katman yok |
+
+**Kural: `unsupported` hiçbir zaman başarılı gösterilmez.** Emülasyon "başarılı" (web
+erişilebilir) olsa bile profil bu durumu açıkça listeler; özet satırı da `unsupported`
+ve `failing` değerlerini öne alır. Profil bir uyarıdır, emülasyonun başarı ölçütü değildir ve
+tersi de geçerlidir: `covered` olması cihazın doğru davrandığı anlamına gelmez (kernel
+stub'ları her `open/write/ioctl`'i başarılı sayar).
+
+#### 9.2.2 Keşif bulguları (ölçüm; yalnızca iki firmware)
+
+Örneklem dardır: **D-Link DIR-868L (ARM)** ve **Netgear WNAP320 (MIPS)**. WNAP320'nin rootfs'i
+taranamadı; yalnızca dosya listesi ve seri log incelendi. Gözlemler:
+
+- İki firmware'de de `/dev/i2c*`, `/dev/spidev*`, `I2C_RDWR`/`SPI_IOC` izi ve I2C/SPI `.ko`
+  dosyası **yok**; yani bu iki örnek için I2C/SPI mock'u bir ihtiyaç göstermedi (genelleme yapılamaz).
+- DIR-868L seri logunda ~147 kez `/dev/nvram: No such device` (libnvram libc `open`'ı
+  yakalamadığı için; bkz. 9.1).
+- WNAP320: watchdog açma hatası 3 kez (`sys-watchdog.ko` var, aygıt düğümü yok), `/dev/led` ve
+  `/dev/sys-reset`, `panel-led-driver.ko`.
+- Her iki mimaride firmadyne kernel kancaları `Cannot register character device` basıyor
+  (ARM: `watchdog`, `wdt`; MIPS: `gpio`, `watchdog`, `wdt`). Nedeni **araştırılmadı**.
+- WLAN ioctl `No such device` en gürültülü kaynak (kapsam dışı).
+- WSL'de çapraz derleyici yok (`libhwmock` için engel, bkz. 9.2.3).
+
+#### 9.2.3 Yapılmayanlar / öneri (uygulanmadı)
+
+- *Dinamik izleme:* `/firmadyne/strace -f -e open,ioctl` ile web servisini izlemek. İkili imajda
+  var ama hiçbir yerde çağrılmıyor (bkz. 9.1); ayrı bir profil modu olarak tasarlanmalı.
+- Statik analiz firmware kodunu **çalıştırmaz** (yalnızca bayt okuma).
 
 **Taklit (mock) katmanları — veri gerektirirse, bu sırayla:**
 
 1. *Dosya tabanlı düğüm* (mevcut desen, en ucuz): yalnızca `read` bekleyen basit
    kullanımlar.
-2. *`libhwmock` (LD_PRELOAD, libnvram ile aynı desen):* `/dev/i2c-*` için `I2C_SLAVE`,
-   `I2C_RDWR`, `I2C_SMBUS`; `/dev/spidev*` için `SPI_IOC_MESSAGE(n)`, `SPI_IOC_RD/WR_*`;
-   tablo dosyasından (`/firmadyne/hwmock/*.conf`) yanıt. **Seviye: işlem (transaction)
-   seviyesi**, register seviyesi değil.
+2. *`libhwmock`:* `/dev/i2c-*` için `I2C_SLAVE`, `I2C_RDWR`, `I2C_SMBUS`; `/dev/spidev*` için
+   `SPI_IOC_MESSAGE(n)`, `SPI_IOC_RD/WR_*`; tablo dosyasından (`/firmadyne/hwmock/*.conf`) yanıt.
+   **Seviye: işlem (transaction) seviyesi**, register seviyesi değil.
+   *Önemli:* `libnvram`'dan farklı olarak bu kütüphane firmware'in kendi sembollerinin yerine
+   geçmez; libc'nin `open`/`ioctl`/`read`/`write` çağrılarını **gerçekten araya girerek (libc
+   interposer)** yakalamak zorundadır. **Statik bağlı ikililer ve doğrudan syscall yapanlar
+   kapsanmaz.** Yüklenmesi de açık bir sorudur: `LD_PRELOAD`'ı hazır kernel ayarlıyor (bkz. 9.1),
+   ikinci bir kütüphane kernel değişikliği ya da başka bir yükleme yolu gerektirebilir.
    *Risk:* firmware'ler eski uClibc/glibc sürümleriyle derlenmiş; `libnvram`'ı üreten
-   çapraz derleme zinciri repoda yok. Bu katmana ancak profil verisi gerekliliği gösterirse
-   ve uyumlu toolchain kararı alındıktan sonra geçilir.
+   çapraz derleme zinciri repoda yok, WSL'de de yok. Bu katmana ancak profil verisi gerekliliği
+   gösterirse ve toolchain ile yükleme yolu kararı alındıktan sonra (ayrı onayla) geçilir.
 3. *Kernel stub listesini genişletme veya QEMU cihaz modeli:* ayrı kernel/QEMU reposunda
    değişiklik ve yeniden derleme gerektirir — kapsam dışı, yalnızca belgelenmiş ihtiyaçla.
 

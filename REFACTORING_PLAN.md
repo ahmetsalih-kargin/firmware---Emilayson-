@@ -12,10 +12,10 @@
 | 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.6 (aşama orkestrasyonu, çıkış kodları, loglama) ve 4.7'nin kilit kısmı (ikinci tur: IID + firmware kilidi, aşama zaman aşımları). ❌ 4.2–4.5 (`makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` hâlâ Bash/eski Python), ❌ 4.7'nin metrikler ve `systemd-run` sınırları kısmı |
 | 5 Ağ izolasyonu | **kısmen** | ✅ 5.1–5.3; 5.4 ağ namespace'i yerine iptables/ip6tables kuralları. **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
 | İkinci sağlamlaştırma turu (2026-11-16, plan dışı) | ✅ | İki tur + bağımsız denetim: `SECURITY.md` S19-S25 (seri logdan komut enjeksiyonu P0 dahil), kilitler, zaman aşımları, sınırlar, `tar2db`/`util`/`extractor`/`docker-helper` hata yönetimi. Kod commit edilmedi. Ayrıntı: `CHANGELOG.md`, `TEST_REPORT.md` |
-| **6 Peripheral (Problem 1)** | **❌ hiç başlanmadı** | I2C/SPI/GPIO ölçümü ve mock yok |
+| **6 Peripheral (Problem 1)** | **kısmen** | 6.1 + seri log kanıtı **uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (profil bilgi amaçlıdır, emülasyon sonucunu etkilemez); 6.2 (strace), 6.3 (rapor), 6.4 (`libhwmock`, toolchain + kernel preload sorusu) ve 6.5 (kernel kanca kayıt hataları) açık. Mock yok |
 | **7 Bağımlılık/kurulum** | **❌ hiç başlanmadı** | Eski bağımlılıklar, `download.sh` checksum, `apt-key`, chromedriver 2.38, `ubuntu:20.04`, Ubuntu 24.04'te `install.sh` |
 
-Üç ana problem: **Problem 1 (peripheral)** hiç ele alınmadı; **Problem 2 (monolitik Bash)** kısmen
+Üç ana problem: **Problem 1 (peripheral)** yalnızca ölçüm tarafında başladı (donanım profili, iki firmware ile gerçek koşuda doğrulandı; mock yok); **Problem 2 (monolitik Bash)** kısmen
 (orkestrasyon taşındı, aşama script'leri taşınmadı); **Problem 3 (kaynak/zombi)** büyük ölçüde çözüldü
 (ölçüldü; ikinci turda IID/firmware kilidi eklendi), kaynak (cgroup) sınırları ve metrikler eksik.
 
@@ -113,10 +113,12 @@ karşılaştırılır (Faz 0 temel çizgisi + Faz 1 karakterizasyon testleri).
 
 | Adım | İçerik |
 |---|---|
-| 6.1 | `firmae/hwprofile.py` statik tarama + sınıflandırma + `hw_profile.json`; birim testleri sentetik rootfs ile |
-| 6.2 | Profil modu: guest'te `/firmadyne/strace` ile `open/ioctl` izleme |
-| 6.3 | Faz 0 firmware seti üzerinde rapor: hangi cihazlar `UNSUPPORTED`, emülasyon sonucu ile ilişkisi |
-| 6.4 | **Karar noktası (ayrı onay):** veriler gerektiriyorsa `libhwmock` (I2C/SPI işlem seviyesi) — çapraz derleme toolchain kararı dahil |
+| 6.1 | `firmae/hwprofile.py` statik tarama + sınıflandırma + `hw_profile.json`; birim testleri sentetik rootfs ile. **Uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (uygulama 2026-11-16; ölçümler: TEST_REPORT.md "Faz 6.1"): `firmae/pipeline.py` `hwprofile` adımını mimari tespitinden sonra, `hwprofile-dynamic` adımını `makeNetwork`'ten sonra çağırır; bilgi amaçlıdır, emülasyon sonucunu/çıkış kodunu etkilemez (`FIRMAE_HWPROFILE=0` ile kapanır). Boru hattı tarafı sahte CLI ile ve ayrıca gerçek `firmae.hwprofile` ile (sentetik tarball + kayıtlı seri log, `test_hwprofile_integration.py`) birim testli; gerçek QEMU koşusunda DIR-868L (ARM) ve WNAP320 (MIPS) ile denendi (iki tur, ağ-hatası yolu, Ctrl-C; sonuçlar ve `run.sh` profil adımından etkilenmedi). Bağımsız denetim (2026-11-17) bulguları (profilleyici bellek/özyineleme, yanlış pozitifler, zaman aşımı tutarsızlığı, bayat profil) düzeltildi — düzeltme sonrası ikinci bir bağımsız denetim yapılmadı (**açık**); ağ çıkarımı başarısızken de dinamik adım çalışır, eski profil statik adımdan önce silinir (SECURITY.md S26). **Açık maddeler:** sayaçların log başına ayrı raporlanması (şimdi ilk+son logun toplamı); ikinci bağımsız denetim; Python 3.8, analyze/debug/run/boot ve Docker modlarında doğrulama |
+| 6.1b | **Seri log kanıtı** (`qemu.initial/final.serial.log` → `--update`): **uygulandı ve gerçek koşuda doğrulandı (2026-11-17)** |
+| 6.2 | Profil modu: guest'te `/firmadyne/strace` ile `open/ioctl` izleme — **açık** (ikili imaja kopyalanıyor ama hiçbir yerde çağrılmıyor) |
+| 6.3 | Faz 0 firmware seti üzerinde rapor: hangi cihazlar `UNSUPPORTED`, emülasyon sonucu ile ilişkisi — **açık** (yalnızca iki firmware'de elle keşif yapıldı: DIR-868L ARM, WNAP320 MIPS; bkz. `ARCHITECTURE.md` 9.2.2) |
+| 6.4 | **Karar noktası (ayrı onay):** veriler gerektiriyorsa `libhwmock` (I2C/SPI işlem seviyesi) — **açık.** Çapraz derleme toolchain kararı dahil; ayrıca `LD_PRELOAD`'ı bu depo değil hazır enstrümante kernel yüklüyor, ikinci bir preload kütüphanesi kernel değişikliği ya da başka bir yükleme yolu gerektirebilir. Gerçek bir libc interposer olmalı (statik ikililer ve doğrudan syscall'lar kapsanmaz). Keşifte I2C/SPI kullanan firmware bulunmadı; ihtiyaç gösterilmedi |
+| 6.5 | **Yeni, açık:** her iki mimaride (ARM: `watchdog`, `wdt`; MIPS: `gpio`, `watchdog`, `wdt`) firmadyne kernel kancalarının `Cannot register character device` hatasının incelenmesi — kernel stub'larının gerçekte çalışıp çalışmadığı belirsiz |
 
 ## Faz 7 — Bağımlılıklar ve kurulum
 
