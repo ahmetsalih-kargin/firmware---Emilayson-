@@ -121,6 +121,9 @@ def project(repo_root, tmp_path):
     root = tmp_path / "FirmAE"
     (root / "scripts").mkdir(parents=True)
     shutil.copy(repo_root / "firmae.config", root)
+    # the wrappers run python3 -m firmae.qemu from the tree they live in
+    shutil.copytree(repo_root / "firmae", root / "firmae",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     for arch in ("armel", "mipseb", "mipsel"):
         shutil.copy(repo_root / "scripts" / ("run.%s.sh" % arch), root / "scripts")
     (root / "scratch" / "1").mkdir(parents=True)
