@@ -209,12 +209,12 @@ tutulur; böylece PID yeniden kullanılmışsa yanlış süreç öldürülmez.
 > `scratch/<IID>/.firmae.lock` IID bilindikten sonra. Alınamazsa çıkış kodu 75 (`BUSY`) ve hiçbir şeye dokunulmaz;
 > kilitler alındıktan sonra o IID'nin eski kaynakları bir kez temizlenir. `scratch/IID/run/lock` ve
 > `scratch/.slots/` **yoktur**; `FIRMAE_MAX_PARALLEL`/slot sınırı **uygulanmadı**; `.locks/*.lock` dosyaları birikir.
-> Yer tutucu NIC soketleri loopback'te IID'ye göre ayrılır (`20000 + 4*(IID % 10000) + n`); `hostfwd` 80/443 sabit kalır (yalnızca 127.0.0.1).
+> Yer tutucu NIC soketleri loopback'te IID'ye göre ayrılır (`20000 + 4*(IID % 10000) + n`); DHCP/user-net modunda `hostfwd` host portları artık dinamiktir (aşağıdaki "Durum" paragrafı ve §8).
 
 (Öneri, uygulanmadı) **Eşzamanlılık:** her IID için `scratch/IID/run/lock` (`fcntl.flock`) → aynı firmware iki kez
 paralel çalışamaz. Global eşzamanlılık sınırı `FIRMAE_MAX_PARALLEL` (varsayılan: CPU/2) ile
 `scratch/.slots/` kilitleri üzerinden. Sabit portlar (2000-2003, hostfwd 80/443) kaldırılır
-(bkz. §8).
+(bkz. §8). **Durum: kısmen.** Slot/`FIRMAE_MAX_PARALLEL` hâlâ yok. Sabit hostfwd portları kaldırıldı (kod + birim test; gerçek DHCP koşusu yok): host portları `127.0.0.1`'de 10000-19999 aralığından, IID başına 40'lık bloktan (`hostfwdBlock(IID)` * 40'tan başlayarak, IID'nin tamamı kullanılır: 250'nin katı kadar farklı IID aynı bloğa düşmez; blok 80, 443 ve en çok 32 ek port için yeter), her biri bind edilerek boşluğu sınanarak seçilir (`makeNetwork.py` `chooseHostPorts`). Eşleme `scratch/<IID>/hostfwd` dosyasına, satır başına `<tcp|udp> <guest portu> <host portu>` biçiminde, symlink izlenmeden yazılır; `check_emulation.sh` onu katı doğrular. Yer tutucu NIC soketleri 20000-59999 aralığındadır, hostfwd aralığıyla çakışmaz. Boşluk sınaması ile QEMU'nun bind'i arasında yarış (TOCTOU) **kabul edilmiştir**: üretilen `run.sh` TCP portlarını QEMU'dan önce yeniden sınar, port o arada alınmışsa QEMU zaten başlamaz. Çoklu NIC: hostfwd yalnız NIC yerleşimi bittikten sonra gerçekten yerleşmiş, DHCP IP'li tek user NIC'e verilir (`qemuNetworkConfigAndHostfwd`; aynı host portu iki kez iletilemez). `scratch/<IID>/hostfwd` o kurallardan değil, üretilen `run.sh`'nin `-netdev` satırlarından geri okunarak yazılır (`hostfwdRulesIn`): dosya varsa kurallar QEMU argümanlarında da vardır. Web denetimi (`scripts/hostfwd_check.sh`, `check_emulation.sh` ve `run_mode.sh` ortak): her denemeden önce emülasyonun yaşadığı (`qemu_pids`, `run.sh` pid'i, zombi denetimi) ve başarılı yanıttan sonra portun sahibinin bu IID'nin QEMU'su olduğu (`ss -Htlnp`) doğrulanır; `ss` yoksa ya da pid okunamıyorsa güvenli tarafta `web=false` + uyarı. slirp dinleyicisinin `ss -p`'de QEMU pid'iyle göründüğü gerçek QEMU ile **doğrulanmadı**.
 
 **Kaynak sınırları:** `systemd-run --scope -p MemoryMax=… -p CPUQuota=…` mevcutsa QEMU
 bunun içinde başlatılır; mevcut değilse sınır **uygulanmadığı loglanır** (sessizce
@@ -262,7 +262,7 @@ değişikliği**, bkz. `REFACTORING_PLAN.md`).
 
 ## 8. QEMU ve ağ mimarisi
 
-> **Gerçek durum:** `qemu.py`/`QemuSpec` yoktur; QEMU komutu hâlâ `scripts/run.<arch>.sh` (ön emülasyon) ve `makeNetwork.py` şablonunda (son emülasyon) ayrı ayrı üretilir. Tablonun "Mevcut" sütunu `master`'ı gösterir. `refactor/hardening`'de uygulananlar: soketler `scratch/IID/run/` altında (0700), `restrict=on`, `hostfwd` ve yer tutucu NIC'ler 127.0.0.1'de, TAP modunda iptables/ip6tables kuralları (netns yerine). Uygulanmayanlar: `ip tuntap` (üretilen `run.sh` hâlâ `tunctl` kullanır), dinamik `hostfwd` portları, `ip netns`. DHCP modu gerçek çalıştırmayla doğrulanmadı.
+> **Gerçek durum (Faz 4.2, 2026-11-17):** `firmae/qemu.py` vardır ama `QemuSpec` yoktur: yalnızca **ilk (ön) emülasyonu** (`build_initial_argv`, `main`; `python3 -I <kurulum>/firmae/qemu.py initial <arch> <IID> <QEMU_INIT>`) ve ortak yardımcıları (arch tabloları, kernel yolu, çekirdek komut satırı, soket tabanı) içerir; `scripts/run.<arch>.sh` üçü ince sarmalayıcıdır (kurulum kökü betiğin ağacından bulunur; `-I` ile cwd ve `PYTHON*` değişkenleri modül arama yoluna girmez, `qemu.py` kurulum kökünü `sys.path`'in SONUNA ekler, yani kullanıcı `PYTHONPATH` ile `firmae`'yi yönlendiremez; `exec python3 -I ...`, sonra `os.execvpe` ile QEMU süreci yerine geçer; arada kabuk/Python süreci kalmaz). **Son emülasyonun şablonu hâlâ `makeNetwork.py` içinde Bash olarak üretilir**; QEMU komutu iki yerde (qemu.py ve makeNetwork.py) üretilir. Altın argv testi ve gerçek QEMU durumu: `TEST_REPORT.md`. Tablonun "Mevcut" sütunu `master`'ı gösterir. `refactor/hardening`'de uygulananlar: soketler `scratch/IID/run/` altında (0700), `restrict=on`, `hostfwd` ve yer tutucu NIC'ler 127.0.0.1'de, TAP modunda iptables/ip6tables kuralları (netns yerine). Dinamik `hostfwd` host portları da uygulandı (kod + birim test, DHCP gerçek koşusu yok). Uygulanmayanlar: `ip tuntap` (üretilen `run.sh` hâlâ `tunctl` kullanır), `ip netns`. DHCP modu gerçek çalıştırmayla doğrulanmadı.
 
 `qemu.py` tek bir `QemuSpec` → `argv` dönüştürücüsü sağlar; arch tabloları (makine, kernel,
 disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karşılığıdır.
@@ -271,12 +271,14 @@ disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karş�
 |---|---|---|---|
 | Monitor/serial soketleri | `/tmp/qemu.IID[.S1]` | `scratch/IID/run/` (0700) + uyumluluk için `/tmp` symlink'i (1 sürüm) | tahmin edilebilir `/tmp` yolu |
 | `-netdev user` | kısıtsız | `restrict=on` (dışarı çıkış yok) | güvenilmeyen firmware |
-| `hostfwd` | `tcp::80-:80` (0.0.0.0) | `tcp:127.0.0.1:<boş port>-:80` | LAN'a açılma, port çakışması, yanlış pozitif |
+| `hostfwd` | `tcp::80-:80` (0.0.0.0) | `tcp:127.0.0.1:<boş port>-:80` (**uygulandı**: 10000-19999, bkz. §7 "Durum") | LAN'a açılma, port çakışması, yanlış pozitif |
 | `-netdev socket,listen=:200x` | 0.0.0.0, sabit port | yer tutucu NIC'ler **korunur** (eth0–eth3 numaralandırması bozulmamalı); yalnızca backend `127.0.0.1` + boş porta bağlanır | çakışma/açılma |
 | TAP | `sudo tunctl` | `ip tuntap` (iproute2), idempotent | uml-utilities bağımlılığı azalır |
 | İzolasyon (Faz 5) | yok | analiz başına `ip netns` | paralel analiz + host izolasyonu |
 
 > **Gerçek durum:** `scratch/IID/run.sh` hâlâ `makeNetwork.py`'nin ürettiği **tam Bash şablonudur** (QEMU komutu, TAP/mount/temizlik trap'i, 16 satırlık imaj dosyası denetim bloğu); tek satırlık Python çağrısı **uygulanmadı**.
+
+**Port keşfi (`findPorts`, Faz 2.10):** seri logdaki `inet_bind` satırları iki biçimde okunur: gerçek 4.1 çekirdek biçimi (`inet_bind[PID: n (ad)]: proto:SOCK_X, port:N`; adres loglanmaz, `0.0.0.0` varsayılır) ve eski biçim (`ip:port: 0x<adres>:<port>`). Port 0 (çekirdek seçer) ve >= 32768 (geçici/ephemeral aralık) atılır; (proto, port) çiftine göre tekrarlar elenir, ilk bind sırası korunur; en çok `MAX_PORTS=256`. `hostfwd` için ayrıca 80/443 çıkarılır ve en çok `MAX_FORWARD_PORTS=32` ek port iletilir.
 
 (Öneri, uygulanmadı) `scratch/IID/run.sh` **üretilmeye devam eder** (kullanıcılar elle çalıştırıyor), ancak
 içeriği tek satırlık bir çağrı olur: `exec python3 -m firmae emulate <IID> --mode "$(basename "$0")"`.

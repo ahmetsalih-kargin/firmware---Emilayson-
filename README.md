@@ -88,6 +88,13 @@ inference failed. A profile from an earlier run is deleted first, and a corrupt 
 `[hw] profil okunamadı (...)` instead of a summary. Not yet verified in a real emulation run; no peripheral is emulated by it. See
 `ARCHITECTURE.md` section 9.
 
+DHCP firmware (QEMU user-mode network, fork): the emulated web UI is reachable only on the
+host's loopback, at `http://127.0.0.1:<host port>` / `https://127.0.0.1:<host port>`. The host
+ports are chosen from 10000-19999 and recorded in `scratch/<IID>/hostfwd` (`<tcp|udp> <guest port>
+<host port>` per line, e.g. `tcp 80 10000`). `run.sh -c` then reports `ip=127.0.0.1`, which is
+the host itself; analysis (`-a`) and debug tools that use that address are not usable in this mode yet (see
+`REFACTORING_PLAN.md`). This mode has not been verified in a real emulation run.
+
 ## Debug
 
 After `run.sh -c` finished.

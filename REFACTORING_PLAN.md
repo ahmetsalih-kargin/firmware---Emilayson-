@@ -1,23 +1,89 @@
 # FirmAE Refactoring Planı
 
-> **Tamamlanma durumu (2026-11-16, ikinci sağlamlaştırma turundan sonra).** Bu belge planı olduğu gibi tutar; gerçek durum aşağıda.
-> Ayrıntılı kanıt: `TEST_REPORT.md`, değişiklikler: `CHANGELOG.md`.
+> **Tamamlanma durumu (2026-11-17, "grup 1" değişiklikleri çalışma ağacında, commit edilmedi).** Bu belge planı olduğu gibi tutar (aşağıdaki Faz 0–7 bölümleri
+> *plandır*, yapılanın kaydı değildir); gerçek durum bu başlıktaki iki tabloda. Kod `refactor/hardening`
+> dalında HEAD `d9aaee7` (commit edilmiş, `origin/refactor/hardening`'e push edilmiş); bu belgedeki 2.10, 5.1 ve 4.2 satırları
+> ise çalışma ağacındaki **commit edilmemiş** değişikliklere dayanır.
+> Güncel birim test sayısı: **1076** (WSL Ubuntu 24.04, Python 3.12, root değil). Ayrıntılı kanıt: `TEST_REPORT.md`,
+> değişiklikler: `CHANGELOG.md`.
+
+## Adım bazında dürüst durum (kodla karşılaştırılarak)
+
+TAMAM = kodda var ve en az birim testli; KISMEN = planın bir kısmı ya da plandan farklı yolla; YOK = yapılmadı;
+DOĞRULANMADI = kod var ama gerçek çalıştırmada denenmedi.
+
+| Adım | Durum | Not |
+|---|---|---|
+| 0.1 | KISMEN | Kurulum WSL'de elle yapıldı; `install.sh` ve `download.sh` **hiç gerçek koşulmadı** |
+| 0.2, 0.3 | TAMAM | Temel çizgi ve Ctrl-C / bozuk firmware senaryoları ölçüldü (`TEST_REPORT.md` Faz 0, Faz 3) |
+| 0.4 | YOK | ARM `virt`'te ttyS1/`/tmp/qemu.IID.S1` çalışıyor mu sorusu **hiç yanıtlanmadı** |
+| 1.1, 1.2 | TAMAM | `tests/conftest.py`, `tests/fixtures/`, `test_network_parse.py` |
+| 1.3 | KISMEN | Plandaki `test_qemu_argv.py` yok; karşılığı `test_qemu_cmd.py` + `test_config_and_initial_qemu.py` |
+| 1.4 | TAMAM | ShellCheck raporu (`TEST_REPORT.md` Faz 1) |
+| (Faz 1) `tests/integration/` | YOK | root gerektiren testler için dizin yok |
+| 2.1, 2.2, 2.6, 2.8, 2.9, 2.11, 2.12 | TAMAM | Birim testli |
+| 2.3 | DOĞRULANMADI | Birim testli (sahte ağaç); uçtan uca firmware imajıyla denenmedi |
+| 2.4 | TAMAM | İzinler daraltıldı (`tests/unit/test_workdir_perms.py`) |
+| 2.5 | KISMEN | `install.sh` `md5` yazıyor (`scram-sha-256` değil; `md5` scram parolalarını da kabul eder) ve `trust` kaldırıldı; `install.sh` **hiç gerçek koşulmadı** |
+| 2.7 | DOĞRULANMADI | `analyses/nmap.sh` düzeltmesi birim testli; **gerçek nmap/fuzzer koşusu yok** |
+| 2.10 | TAMAM | `findPorts` gerçek 4.1 çekirdek biçimini (`inet_bind[PID: n (ad)]: proto:SOCK_X, port:N`) ve eski biçimi ayrıştırır; port 0 ve >= 32768 atılır, (proto, port) çiftine göre tekrar elenir, en çok `MAX_PORTS=256`. Gerçek iki fixture ile birim testli |
+| 3.1 | KISMEN | `firmae/proc.py`/`resources.py`/`signals.py` yok; yerine `scripts/procgroup.py` (`run_with_timeout`, `raise_on_sigterm`) ve `firmae.config` |
+| 3.2, 3.3 | KISMEN | `-pidfile` **yok**; yerine `firmae.config` `qemu_pids` (`/proc/*/cmdline` + `image.raw` tam yol eşlemesi) ile hedefli sonlandırma; temizlik `trap` ile (`check_emulation.sh`, üretilen `run.sh`) |
+| 3.4 | TAMAM | `add_partition` sınırlı bekleme (birim testli) |
+| 3.5 | KISMEN | `timeout -k 15` yok; yerine `run_with_timeout` (SIGINT, `grace` sonra SIGKILL) |
+| (Faz 3) cgroup, `FIRMAE_MAX_PARALLEL`/slot | YOK | Kaynak sınırı ve global eşzamanlılık sınırı yok |
+| 4.1 | TAMAM | `firmae/config.py`, `errors.py`, `log.py`, `state.py` |
+| 4.2 | TAMAM | `firmae/qemu.py` (`build_initial_argv`, `main`); `run.<arch>.sh` üçü ince sarmalayıcı, çağrı `exec python3 -I <kurulum>/firmae/qemu.py initial <arch> "$@"`; 54 durumluk altın argv + Bash↔Python eşdeğerlik testleri. **Gerçek QEMU ile ölçüldü (2026-11-17, WSL2; A/B/C/G/H, bkz. `TEST_REPORT.md` bölüm H)**: TAP modunda `run.sh` tabanla aynı, Ctrl-C temiz; DHCP modu gerçek firmware ile hâlâ doğrulanmadı |
+| 4.3–4.5 | YOK | `makeImage.sh`, `makeNetwork.py` (final `run.sh` şablonu hâlâ Bash üretiyor), `check_emulation.sh` hâlâ Bash/eski Python |
+| 4.6 | KISMEN | Aşama orkestrasyonu, çıkış kodları, loglama **hepsi `firmae/pipeline.py` içinde**; `stages/`, `arch.py`, `modes.py` yok. `_run_mode` hâlâ `scripts/run_mode.sh`'i çağırır. `ExitCode.ANALYSIS = 60` tanımlı ama hiçbir yerde kullanılmıyor |
+| 4.7 | KISMEN | `scratch/.locks/<md5>.lock` + `scratch/<IID>/.firmae.lock` (çıkış 75) ve aşama zaman aşımları var; `metrics.py` ve `systemd-run` sınırları **yok** |
+| 5.1 | TAMAM (kod) | `restrict=on`, `127.0.0.1`; DHCP/user-net modunda host portları 10000-19999 aralığından, IID başına 40'lık bloktan (`hostfwdBlock`, IID'nin tamamı kullanılır), boşluğu sınanarak seçilir; eşleme `scratch/<IID>/hostfwd`; `check_emulation.sh` yalnız eşlenen porta gider (host'un 80'i yanlış pozitif vermez). **DHCP modu gerçek firmware/QEMU ile hiç koşulmadı: DOĞRULANMADI.** Analiz araçları hâlâ eski varsayımda — bkz. "Takip gerekir" |
+| 5.2 | TAMAM | Yer tutucu NIC soketleri loopback'te IID'ye göre ayrılmış portlarda |
+| 5.3 | KISMEN | Soketler `scratch/IID/run/` altında, `debug.py` yeni yolu okur; **`/tmp` uyumluluk symlink'i yok** |
+| 5.4 | KISMEN | `ip netns` yerine iptables/ip6tables kuralları; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
+| 6.1, 6.1b | DOĞRULANMADI | Uygulandı, iki firmware ile gerçek koşuda denendi (DIR-868L ARM, WNAP320 MIPS); ikinci bağımsız denetim ve analyze/debug/run/boot/Docker modlarında doğrulama yok |
+| 6.2–6.5 | YOK | Açık (strace profil modu, rapor, `libhwmock` kararı, kernel kanca hataları) |
+| 7 | YOK | Hiç başlanmadı |
+| Modlar | DOĞRULANMADI | analyze (`-a`), debug, run, boot, Docker ve DHCP modları **hiç gerçek koşulmadı** |
+| `mount.sh`/`umount.sh` | — | Depoda hiçbir yerden çağrılmıyor (yalnızca kullanım metni/yorum) |
+
+## Faz özeti
 
 | Faz | Durum | Yapılmayanlar / not |
 |---|---|---|
-| 0 Ölçüm | ✅ | — |
-| 1 Test iskeleti | ✅ | Kapsam: ağ çıkarımı, QEMU komutları, yaşam döngüsü, boru hattı, kilitler, ikinci tur düzeltmeleri (**428 test**; ilk tamamlanışta 181). `tests/integration/` (root gerektiren) **yok** |
-| 2 Güvenlik/işlevsel | ✅ 2.1–2.9, 2.11, 2.12 | **2.10 yapılmadı** (port keşfi: dinamik `hostfwd` portları olmadan zararlı) |
-| 3 Süreç/kaynak | ✅ | Plandaki ayrı `proc/resources` paketi yerine `firmae.config` + `scripts/procgroup.py`. **cgroup sınırları ve `FIRMAE_MAX_PARALLEL`/slot sınırı yok.** Eşzamanlılık kilidi artık **var** (ikinci tur: `scratch/.locks/<md5>.lock` + `scratch/<IID>/.firmae.lock`, çıkış 75); `.locks/*.lock` dosyaları birikir |
-| 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.6 (aşama orkestrasyonu, çıkış kodları, loglama) ve 4.7'nin kilit kısmı (ikinci tur: IID + firmware kilidi, aşama zaman aşımları). ❌ 4.2–4.5 (`makeImage.sh`, `makeNetwork.py`, `run.<arch>.sh`, `check_emulation.sh` hâlâ Bash/eski Python), ❌ 4.7'nin metrikler ve `systemd-run` sınırları kısmı |
-| 5 Ağ izolasyonu | **kısmen** | ✅ 5.1–5.3; 5.4 ağ namespace'i yerine iptables/ip6tables kuralları. **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
-| İkinci sağlamlaştırma turu (2026-11-16, plan dışı) | ✅ | İki tur + bağımsız denetim: `SECURITY.md` S19-S25 (seri logdan komut enjeksiyonu P0 dahil), kilitler, zaman aşımları, sınırlar, `tar2db`/`util`/`extractor`/`docker-helper` hata yönetimi. Kod commit edilmedi. Ayrıntı: `CHANGELOG.md`, `TEST_REPORT.md` |
+| 0 Ölçüm | **kısmen** | 0.4 yanıtsız; `install.sh` koşulmadı |
+| 1 Test iskeleti | **kısmen** | Kapsam: ağ çıkarımı, QEMU komutları, yaşam döngüsü, boru hattı, kilitler, ikinci tur ve Faz 6.1 testleri (**1076 test**; ilk tamamlanışta 181). `tests/integration/` (root gerektiren) **yok** |
+| 2 Güvenlik/işlevsel | ✅ 2.1–2.4, 2.6, 2.8–2.12; **2.5, 2.3, 2.7 kısmen/doğrulanmadı** | 2.10 tamam (5.1'in dinamik portlarıyla birlikte) |
+| 3 Süreç/kaynak | **kısmen** | Plandaki ayrı `proc/resources` paketi yerine `firmae.config` + `scripts/procgroup.py`; `-pidfile` yerine `qemu_pids`. **cgroup sınırları ve `FIRMAE_MAX_PARALLEL`/slot sınırı yok.** Eşzamanlılık kilidi **var** (`scratch/.locks/<md5>.lock` + `scratch/<IID>/.firmae.lock`, çıkış 75); `.locks/*.lock` dosyaları birikir |
+| 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.2 (gerçek QEMU ile TAP modunda ölçüldü, 2026-11-17), 4.6'nın orkestrasyon kısmı ve 4.7'nin kilit/zaman aşımı kısmı. ❌ 4.3–4.5, ❌ `stages/`/`arch.py`/`modes.py`, ❌ metrikler ve `systemd-run` |
+| 5 Ağ izolasyonu | **kısmen** | 5.1 (DHCP `hostfwd` dinamik loopback portları; analiz araçları hâlâ eski varsayımda), 5.2, 5.3 (symlink yok), 5.4 (iptables). **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı |
+| İkinci sağlamlaştırma turu (2026-11-16, plan dışı) | ✅ | İki tur + bağımsız denetim: `SECURITY.md` S19-S25 (seri logdan komut enjeksiyonu P0 dahil), kilitler, zaman aşımları, sınırlar, `tar2db`/`util`/`extractor`/`docker-helper` hata yönetimi. Commit edilmiş ve push edilmiştir. Ayrıntı: `CHANGELOG.md`, `TEST_REPORT.md` |
 | **6 Peripheral (Problem 1)** | **kısmen** | 6.1 + seri log kanıtı **uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (profil bilgi amaçlıdır, emülasyon sonucunu etkilemez); 6.2 (strace), 6.3 (rapor), 6.4 (`libhwmock`, toolchain + kernel preload sorusu) ve 6.5 (kernel kanca kayıt hataları) açık. Mock yok |
 | **7 Bağımlılık/kurulum** | **❌ hiç başlanmadı** | Eski bağımlılıklar, `download.sh` checksum, `apt-key`, chromedriver 2.38, `ubuntu:20.04`, Ubuntu 24.04'te `install.sh` |
 
 Üç ana problem: **Problem 1 (peripheral)** yalnızca ölçüm tarafında başladı (donanım profili, iki firmware ile gerçek koşuda doğrulandı; mock yok); **Problem 2 (monolitik Bash)** kısmen
 (orkestrasyon taşındı, aşama script'leri taşınmadı); **Problem 3 (kaynak/zombi)** büyük ölçüde çözüldü
 (ölçüldü; ikinci turda IID/firmware kilidi eklendi), kaynak (cgroup) sınırları ve metrikler eksik.
+
+## Takip gerekir: DHCP/user-net modunda hâlâ `127.0.0.1` + sabit port varsayan yerler
+
+DHCP modunda `check_emulation.sh` `scratch/<IID>/ip` dosyasına `127.0.0.1` yazar (host'un kendisi; guest'e yalnızca
+`scratch/<IID>/hostfwd` içindeki loopback portlarıyla erişilir). Denetim sonrası durum (çalışma ağacı, kodda doğrulandı):
+
+- **Kapatıldı:** `scripts/run_mode.sh`: `isDhcp` dosyası `true` ise analyze araç çalıştırmadan reddedilir (çıkış 60,
+  `ExitCode.ANALYSIS`; `firmae/pipeline.py` bu kodu `ExitCode`'a çevirir), debug reddedilir (çıkış 50, 31337-31339 ve gdbserver
+  portları user-net'te iletilmez), run modu yalnız eşlenen porta bakar (`scripts/hostfwd_check.sh`); TAP dalları değişmedi.
+  Yalnız birim testli (`tests/unit/test_run_mode_dhcp.py`), gerçek DHCP koşusu yok.
+- **AÇIK:** `debug.py` (31337/31338/31339 ve gdbserver portları, hedef `ip` dosyası), `analyses/initializer.py`
+  (`http://<ip>`, portsuz), `analyses/nmap.sh` + `analyses/analyses_all.sh` (`sudo nmap <hedef>`; hedef `127.0.0.1`
+  ise host taranır), `analyses/fuzzer/fuzzer.py` (nmap raporunu okur) ve `util/collect_result.py` DHCP desteği olmadan
+  kalıyor; `run_mode.sh` artık bunlara DHCP'de ulaşmıyor ("ret ile kapatıldı"), ama doğrudan çağrılırlarsa hâlâ
+  `127.0.0.1`'i = host'u hedefler.
+- **AÇIK:** `firmae/pipeline.py` ~565: `"Network reachable on %s!"` mesajı DHCP'de `127.0.0.1` yazar; bu adres guest değil
+  host'tur, mesaj yanıltıcıdır.
+- DHCP'de `ping` = web kararı (ICMP iletilmez) korundu.
+
+DHCP modunda erişim: `http://127.0.0.1:<host portu>` (`scratch/<IID>/hostfwd`). Bunun dışındaki kullanım doğrulanmadı.
 
 ## Çalışma kuralları
 
@@ -93,7 +159,7 @@ karşılaştırılır (Faz 0 temel çizgisi + Faz 1 karakterizasyon testleri).
 | Adım | İçerik |
 |---|---|
 | 4.1 | `firmae/config.py`, `errors.py`, `log.py`, `state.py` |
-| 4.2 | `firmae/qemu.py` → `run.<arch>.sh` üçü de `python3 -m firmae qemu-initial` çağırır |
+| 4.2 | `firmae/qemu.py` → `run.<arch>.sh` üçü de `python3 -I <kurulum>/firmae/qemu.py initial <arch> <IID> <QEMU_INIT>` çağırır |
 | 4.3 | `firmae/storage.py` + `stages/image.py` → `makeImage.sh` host tarafı (chroot script'leri aynen) |
 | 4.4 | `stages/infer_network.py` → `makeNetwork.py` (parse fonksiyonları taşınır, Bash şablonu kalkar; `scratch/IID/run.sh` tek satırlık çağrıya döner) |
 | 4.5 | `stages/check.py` → `check_emulation.sh` |

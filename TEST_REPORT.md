@@ -1,5 +1,9 @@
 # FirmAE Test Raporu
 
+> **Not (2026-11-17):** Faz 2–5 ve ikinci tur bölümlerindeki "commit edilmemiş" ifadeleri **ölçüm anını** anlatan tarihsel
+> kayıttır; kodun tamamı sonradan commit edilmiş ve `origin/refactor/hardening`'e push edilmiştir (HEAD `d9aaee7`, dalda 136 commit).
+> Güncel birim test sayısı 1076 (çalışma ağacı, bkz. "Faz 2.10 / 5.1 / 4.2").
+
 ## Faz 0 — Değişiklik öncesi temel çizgi (2026-11-04)
 
 > Bu bölüm **hiçbir kod değişikliği yapılmadan**, `master` `653565b` üzerinde ölçülmüştür.
@@ -199,7 +203,7 @@ Dosya başına (host, `-x` ile kaynak edilen `firmae.config` sayıları `run.sh`
 ## Faz 2 — Güvenlik ve işlevsel düzeltmeler (2026-11-04)
 
 > Değişikliklerin listesi ve davranış değişiklikleri: `CHANGELOG.md`. Kod `653565b`
-> üzerine **commit edilmemiş** Faz 2 değişiklikleriyle test edildi. Aynı içerik daha sonra
+> üzerine (ölçüm anında) **commit edilmemiş** Faz 2 değişiklikleriyle test edildi (sonradan hepsi commit edildi ve push edildi). Aynı içerik daha sonra
 > değiştirilmeden `refactor/hardening` dalına adım başına bir commit olarak alındı. Test
 > takımı 13 commit'in her birinde ayrı ayrı çalıştırıldı ve hepsinde geçti (54 → 106 test).
 
@@ -262,7 +266,7 @@ Faz 0'ın A ve B senaryoları, Faz 2 koduyla root olarak tekrar çalıştırıld
 
 ## Faz 3 — Süreç ve kaynak yaşam döngüsü (2026-11-04)
 
-> Ayrıntılar: `CHANGELOG.md`. `067f99e` üzerine **commit edilmemiş** Faz 3 değişiklikleriyle
+> Ayrıntılar: `CHANGELOG.md`. `067f99e` üzerine (ölçüm anında) **commit edilmemiş** Faz 3 değişiklikleriyle
 > test edildi. Soket temizliği (`rm -f /tmp/qemu.<IID>*`) ölçümden **sonra** eklendi;
 > ölçüm bu satır olmadan yapıldı, satır birim testiyle doğrulandı.
 
@@ -312,7 +316,7 @@ reddedildi (ilk çalıştırma geçersiz sayıldı). Test kümesi 5433'e taşın
 
 ## Faz 4 — Python orkestrasyonu, kısmi (2026-11-05)
 
-> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `ec2370b` üzerine **commit
+> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `ec2370b` üzerine (ölçüm anında) **commit
 > edilmemiş** Faz 4 değişiklikleriyle test edildi.
 
 **Kapsam:** yalnızca `run.sh`'ın aşama orkestrasyonu Python'a taşındı. `makeImage.sh`,
@@ -363,7 +367,7 @@ sonuç Faz 3 çıktısıyla **birebir aynı**; tek yeni dosya `firmae.log`. C'de
 
 ## Faz 5 — Ağ izolasyonu, kısmi (2026-11-08)
 
-> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `a6dcfe4` üzerine **commit edilmemiş**
+> Ayrıntılar ve davranış değişiklikleri: `CHANGELOG.md`. `a6dcfe4` üzerine (ölçüm anında) **commit edilmemiş**
 > Faz 5 değişiklikleriyle test edildi. Önceki oturum ölçüm sırasında kesildi (yarım kalan
 > çalıştırma kaynak bırakmamıştı); ölçüm baştan tekrarlandı.
 
@@ -391,7 +395,7 @@ adresleri farklı (`listen=:2001` → `listen=127.0.0.1:20005`).
 ### Faz 5 kalanı: TAP modunda misafir yalıtımı (2026-11-08)
 
 > Adım 5.4 için ağ namespace'i yerine güvenlik duvarı kuralları kullanıldı (gerekçe: `CHANGELOG.md`).
-> `b598d5c` üzerine **commit edilmemiş** değişiklikle test edildi. WSL'de `iptables` kurulu
+> `b598d5c` üzerine (ölçüm anında) **commit edilmemiş** değişiklikle test edildi. WSL'de `iptables` kurulu
 > değildi, kuruldu; WSL'de `ip_forward=1` (Docker Desktop): misafir paketleri host üzerinden
 > yönlendirilebiliyordu.
 
@@ -470,7 +474,7 @@ emülasyonu, iki aynı mimari firmware'in paralel çalıştırılması, uzun sü
 
 > Bu bölüm önceki bölümlerin sayılarına dokunmaz (onlar tarihsel kayıttır). Değişiklikler:
 > `CHANGELOG.md` "Second hardening pass"; bulgular: `SECURITY.md` S19-S25. Kod henüz
-> commit edilmedi (`git status`).
+> ölçüm anında commit edilmemişti; sonradan commit edildi ve `origin/refactor/hardening`'e push edildi (HEAD `d9aaee7`).
 
 **Yöntem.** İki tur: her turda paralel çalışan geliştirici ajanlar (toplam yedi) ayrı dosya
 kümelerini düzeltti ve test yazdı; ayrıca sıfır bağlamlı bağımsız bir denetçi hem kodu hem
@@ -523,8 +527,8 @@ fark (önceki commit'e göre) şablondaki 16 satırlık denetim bloğu
 - `findPorts` gerçek 4.1 çekirdek log biçimini tanımıyor (bilinen, bilerek bekletildi).
 - TAP adları ve iptables etiketi host genelinde tek ad alanı: aynı IID'li iki kurulum çakışır.
 - `scratch/.locks/*.lock` dosyaları birikir; `get_scratch` hâlâ global `IID` kullanıyor.
-- Açık bulgular S7, S9, S10, S11, S15, S16; Faz 6 (peripheral) ve Faz 7 (bağımlılık/kurulum)
-  hiç başlanmadı.
+- Açık bulgular S7, S9, S10, S11, S15, S16; Faz 7 (bağımlılık/kurulum) hiç başlanmadı; Faz 6
+  (peripheral) yalnızca 6.1 (bkz. aşağıdaki "Faz 6.1"), 6.2–6.5 açık (bu bölüm 2026-11-16 durumunu anlatır).
 - Eşzamanlı çalıştırma kilidi birim testlerle (gerçek `flock` tutan ayrı süreç) denendi;
   iki gerçek emülasyonun aynı anda koşturulması doğrulanmadı.
 
@@ -669,3 +673,122 @@ başlık sınırını kapatan birim testidir (yukarıdaki 40 koşu).
 **Kısıtlar.** Bekçi Linux'a özgü (`/proc`); başka yerde kapalı, yalnız sert son çare ve `RLIMIT_AS` kalır.
 Sert sınırdaki dönme kendi başına duruyor; bekçi ondan önce durdurarak kaçınıyor, dönmeyi gidermiyor.
 Sert son çare yalnız sahte `scan_tarball` ile sınandı. **Bu düzeltme için ikinci bağımsız denetim yapılmadı.**
+
+### G) Kararsız test düzeltmesi: `test_normal_exit_leaves_no_background_process_behind` (2026-11-17)
+
+**Belirti.** Testin `/proc/<pid>/stat` döngüsü yalnız `FileNotFoundError` yakalıyordu. Süreç dosya açıldıktan sonra,
+`read()` sırasında reap edilirse çekirdek `ProcessLookupError` (ESRCH) fırlatır; test "süreç kaldı" demeden, yakalanmamış
+istisnayla kalıyordu.
+
+**Ölçüm (WSL2 Ubuntu, Python 3.12; testi tek başına, her seferinde yeni pytest süreci olarak döngüde koşarak).**
+
+| | Koşu | Başarısız |
+|---|---|---|
+| Düzeltmeden önce | 100 | 12 (`ProcessLookupError`, `test_audit_fixes.py:116`) |
+| Düzeltmeden önce (ikinci ölçüm) | 150 | 6 (aynı hata) |
+| Düzeltmeden sonra | 200 | 0 |
+| Tam takım, düzeltmeden sonra | 2 | 0 (772 passed, 127,7 s ve 108,9 s) |
+
+**Düzeltme.** Yalnız yarış kapatıldı: `FileNotFoundError`, `ProcessLookupError` ile boş/yarım `stat` içeriğinin yol açtığı
+`IndexError`/`ValueError` "süreç bitti" sayılır. Asıl iddia (normal çıkıştan sonra arka plan süreci kalmaz; kalırsa 5 sn
+sonra `pytest.fail`) aynı.
+
+**Aynı kalıp başka testlerde (sonradan, "grup 1" turunda aynı şekilde kapatıldı — yalnız yarış, asıl iddialar aynı; ayrı bir 100/200 koşulu ölçümü yapılmadı, yalnız tam takım koşuları aşağıda):** `tests/unit/test_procgroup.py:18-20`,
+`tests/unit/test_lifecycle_functions.py:43-45`; `tests/unit/test_pipeline.py:368` ve `tests/unit/test_pipeline_hwprofile.py:595`
+(`os.path.exists` sonra `open` — aynı yarış, hiç yakalama yok). Üretim kodunda (`scripts/procgroup.py`, `firmae/`, `firmae.config`)
+`/proc/<pid>/stat` okuması yok; `firmae.config:420-470` (`qemu_pids`, `scratch_pids`) `/proc/*/cmdline`i `|| continue` ile okur, her hatayı "süreç gitti" sayar (güvenli).
+
+## Faz 2.10 / 5.1 / 4.2 (2026-11-17)
+
+> Kod: çalışma ağacında **commit edilmemiş** "grup 1" değişiklikleri (HEAD `d9aaee7` üzerine). Ayrıntı: `CHANGELOG.md`
+> "Phase 2.10 / 5.1 / 4.2". Bu bölüm yalnız birim testle ölçülenleri anlatır; gerçek koşu **yoktur** (aşağıda "Doğrulanmayanlar").
+
+### A) Birim testleri
+
+WSL Ubuntu 24.04, Python 3.12, root değil; her koşuda çalışma ağacının temiz bir kopyası (`.git` ve `__pycache__` hariç), tam takım **sırayla** iki kez: **1076 passed** (131,2 s) ve **1076 passed** (133,4 s). Bundan önceki 772 test, bu turla 1076'ya çıktı. Aynı kopya üzerinde ölçüldü; ölçümden önceki koşular (ağaç o sırada başka ajanlarca değiştiriliyordu, kopya her koşuda yeniden alınmıştı) şunlardı: 1012 passed + 1 failed (`test_qemu_py.py::test_sigint_kill_fallback_kills_qemu_that_ignores_sigint`, QEMU taklidi SIGKILL yerine -15 ile bitti; bir daha görülmedi, nedeni belirlenmedi — WSL'de aynı sırada başka bir ajanın süreçleri çalışıyordu), 1013 passed, 1075 passed ve iki kez `test_review_fixes_scripts.py::test_process_clips_networks_and_ip_files` kırık (ağaç o sırada değişiyordu; sonraki kopyada geçti). Bu bölümdeki 1076 sayısı son, kararlı ağaçtandır.
+
+
+### B) Altın argv (4.2) nasıl yakalandı
+
+`tests/unit/golden_qemu_initial.json`: `scripts/run.{armel,mipseb,mipsel}.sh`in **eski Bash sürümleri** sahte bir `qemu-system-*`
+ile (QEMU hiç başlatılmadan) çalıştırılıp komut satırı (argv) kaydedildi; 54 durum = 3 mimari x `FIRMAE_NET` x `FIRMAE_KERNEL` x
+IID'ler, ayrıca boş/boşluklu `QEMU_INIT` ve diğer `FIRMAE_*` anahtarları kapalı durumlar. `tests/unit/test_qemu_py.py` (a)
+`firmae.qemu.build_initial_argv`in bu argv'yi birebir ürettiğini, (b) yeni sarmalayıcı betiklerin (sahte QEMU ile, Linux'ta) aynı
+argv'yi çalıştırdığını (Bash↔Python eşdeğerliği), (c) sahte QEMU'nun sarmalayıcıyı başlatan süreçle aynı PID'e sahip olduğunu
+(`os.execvpe`, arada süreç yok), (d) SIGINT'in doğrudan QEMU'ya ulaştığını ve SIGINT'i yok sayan QEMU'nun SIGKILL ile sonlandığını,
+(e) SIGPIPE/SIGXFSZ'in exec öncesi varsayılana döndüğünü, (f) sarmalayıcının `python3 -I` ile çalıştığını (cwd'deki sahte `firmae/` paketi yüklenmez, kurulum kökü `sys.path`'in sonundadır) denetler. Bilinçli farklar ayrı altın dosyada (`tests/unit/golden_old_quirks.json`, `git archive HEAD` eski betikleriyle sahte QEMU'da kaydedildi): baştaki sıfırlı IID (`08`/`09`) ve `true`/`false` dışı `FIRMAE_NET` eski betikte QEMU'yu başlatıyordu, yeni kod reddeder; eski betikte `FIRMAE_NET=yes` keyfi komut (`/usr/bin/yes`) çalıştırıyordu.
+
+### C) `findPorts` — gerçek fixture sonuçları (2.10)
+
+| Fixture | Sonuç (ilk bind sırasıyla) |
+|---|---|
+| DIR-868L (ARM, 4.1 çekirdek; 40 `inet_bind` satırı) | udp 19541, 5353, 67, 5355, 137, 53, 1900; tcp 4433, 443, 53, 8181, 80, 8182 |
+| WNAP320 (MIPS eb; 20 satır, 11'i `ntpclient` port 0) | tcp 80, 443, 22; udp 161, 137, 138 |
+
+Atılanlar: port 0 (mDNSResponder, arpmonitor, ntpclient), geçici aralık >= 32768 (fakedns:63481, httpd:49152) ve tekrarlar. Test:
+`tests/unit/test_network_parse.py` (`REAL_PORTS`). `tests/unit/test_dhcp_ports.py`: iki `inet_bind` biçimi, sınırlar, `chooseHostPorts`/`hostfwdBlock`, `scratch/<IID>/hostfwd` biçimi (run.sh'nin `-netdev` satırlarından geri okunur), `check_emulation.sh` DHCP dalı ve `hostfwd_check.sh` (yabancı dinleyici, yaşamayan emülasyon, `ss` yok durumları); `tests/unit/test_run_mode_dhcp.py`: `run_mode.sh` DHCP dalları (analyze 60, debug 50, run).
+
+### D) TAP modunda üretilen `run.sh` değişmedi
+
+`sha256sum tests/fixtures/generated/*.expected` ile `git show HEAD:<yol> | sha256sum` bu turda karşılaştırıldı, **eşit**:
+
+| Dosya | sha256 (çalışma ağacı = HEAD) |
+|---|---|
+| `run_sh_armel_dir868l.expected` | `ebd0f9443cd94c72d6535085529508ed0bc6a0429aef0f7be128e2e8dbfbd746` |
+| `run_sh_mipseb_wnap320.expected` | `7d54bb4dd0e300e7b2e7187126fddcb598deb22c966a8556331c6946875e7d3c` |
+
+### E) Test düzeltmeleri
+
+- `test_qemu_cmd.py::test_user_network_is_isolated_and_forwards_on_loopback_only` eski sabit `127.0.0.1:80-:80` çıktısını kilitliyordu
+  (kırıktı); artık açık `hostfwd=[("tcp",80,10000),("tcp",443,10001),("tcp",8080,10002)]` verir, iddia aynı (`restrict=on`, hepsi
+  `127.0.0.1`, `0.0.0.0`/boş adresli kural yok). Yeni test `hostfwd=None` (`chooseHostPorts`: 80, 443 ve ek portlar, host portları
+  10000-19999, benzersiz) ve `hostfwd=[]` (yalnız `restrict=on`) davranışını kilitler.
+- `/proc/<pid>/stat` yarışı (G bölümündeki kalıp) `test_procgroup.py`, `test_lifecycle_functions.py`, `test_pipeline.py` ve
+  `test_pipeline_hwprofile.py`de aynı şekilde kapatıldı.
+
+### F) Doğrulanmayanlar
+
+- **DHCP modu eldeki iki firmware ile tetiklenemiyor** (`isDhcpIp` yalnız `10.0.2.*` / `*.190`); gerçek DHCP koşusu için uygun firmware gerekir. `ss -p`'nin slirp dinleyicisini QEMU pid'iyle gösterdiği doğrulanmadı.
+- **DHCP/user-net modu gerçek firmware ve gerçek QEMU ile hiç koşulmadı.** Port seçimi, `hostfwd` dosyası ve `check_emulation.sh`
+  DHCP dalı yalnız birim testlidir; `-netdev user,...,hostfwd=...` argümanını gerçek QEMU'nun kabul ettiği görülmedi.
+- **4.2 (`firmae.qemu`) gerçek QEMU ile denenmedi**; bu belge yazılırken gerçek koşu yapılmamıştı (ilk deneme WSL çökmesi yüzünden ölçüm üretmedi; sonuç sonradan eklenecek). Testler sahte QEMU kullanır.
+- **Docker modu** hiç denenmedi.
+- DHCP modunda analiz araçları (`nmap.sh`, `analyses_all.sh`, `initializer.py`, `debug.py`) hâlâ `127.0.0.1`'i (host) hedefler (açık,
+  `REFACTORING_PLAN.md` "Takip gerekir").
+- Port boşluk sınaması ile QEMU'nun bind'i arasındaki yarış (TOCTOU) kabul edildi; `run.sh` TCP portlarını QEMU'dan önce yeniden sınar.
+
+### G) Olay notu: doğrulama sırasında WSL dört kez çöktü (2026-11-17)
+
+Grup 1 doğrulaması sırasında WSL dört kez çöktü (`Wsl/Service/E_UNEXPECTED`; yarım kalan test koşuları sonuç üretmedi ve baştan alındı).
+Kök neden grup 1 kodu **değil**: bir deneme betiği eski `run.<arch>.sh`'yi `FIRMAE_NET=yes` ile çalıştırdı (eski betik bu değeri komut olarak
+çalıştırır: `/usr/bin/yes`) ve çıktısını zaman aşımsız belleğe topladı (~7 GB); çekirdek OOM'u systemd `init.scope`'unu durdurdu, WSL'deki
+tüm işler SIGTERM aldı. Mekanizma `journalctl` ile doğrulandı; tetikleyen betik **güçlü şüphe**, sürecin komut satırı günlükte yok.
+Önlemler: alt süreçlere zaman aşımı ve çıktı sınırı; gerçek emülasyon yalnız tek başına koşulur, tam takım aynı anda birden çok kez koşulmaz.
+Bu olay yüzünden gerçek QEMU ile 4.2 ölçümü bu belge yazılırken yapılmamıştı.
+
+### H) Grup 1 gerçek emülasyon doğrulaması (WSL2 Ubuntu, ölçüm: 2026-11-17)
+
+Sonuç dizinleri: `/home/ahmet/firmae-phase0/results/20261117-062305` (A, B, C, G), `.../20261117-132638` (H); karşılaştırma tabanı: `.../20261117-011518`.
+Bu bölümdeki her şey **ölçülmüştür**; ölçülmeyenler "Hâlâ doğrulanmayanlar" altında ayrıdır (F bölümünün 4.2 ve `ss -p` maddeleri bu bölümle kısmen güncellenmiştir).
+
+**Ölçülenler**
+
+- Tam birim takımı, eşitlenmiş ağaçta: **1076 geçti** (132 sn).
+- **A (ARM, DIR-868L):** çıkış 0, 422 sn (taban 450 sn). **B (MIPS, WNAP320):** çıkış 0, 384 sn (taban 402 sn). Bitiş anlık görüntüsü sayaçları hep 0; sentinel hayatta kaldı.
+  `result`/`ping`/`web`/`ip`/`architecture`/`ip.0`/`ip_num`/`isDhcp` dosyaları tabanla aynı; üretilen `run.sh` ikisinde de bayt bayt aynı. Tek fark `isolation` içindeki iptables paket sayacı (A 6→5, B 16→21; trafik gürültüsü).
+- **C (başlangıç emülasyonunda Ctrl-C):** kesildi, 6 sn'de bitti; +5 sn ve +30 sn'de qemu/firmae/hwprofile süreci yok; sayaçlar 0.
+  **G (C'den sonra yeniden koşu):** çıkış 0, 404 sn, sonuç `true`.
+- **H (son emülasyonda Ctrl-C):** ilk deneme **geçersiz**: `makeImage.sh` içindeki `/sbin/fdisk` D (kesilemez) durumunda takıldı, öldürülemedi, ikinci denemeyi de engelledi; yalnız `wsl --shutdown` ile temizlendi.
+  Neden bilinmiyor; aynı ağaç fdisk'i A/B/C/G'de ve H yeniden koşusunda geçti, bu yüzden ortamsal görünüyor (**kanıtlanmadı**).
+  WSL yeniden başlatıldıktan sonraki H koşusu: `run.sh`'ye SIGINT'ten bitişe 3 sn (taban 5 sn), +5/+30 sn'de süreç yok, tüm sayaçlar 0, `[-] interrupted`; dinamik donanım profili adımı Ctrl-C'de çalışmaz (tasarım gereği).
+- **Yeni kod yolu (4.2):** başlangıç QEMU'su `firmae/qemu.py` tarafından doğrudan `exec` edilir (ebeveyn pid = `makeNetwork.py`); araya giren `qemu.py` ya da `run.<arch>.sh` süreci yok.
+  TAP modunda `hostfwd` dosyası yok (A, B, G). `findPorts` çıktısı `makeNetwork.log`'da var (A: örn. tcp 443, 4433, udp 19541; B: tcp 80, 443, 22; udp 161, 137, 138). `hw_profile.json` çevre birimi durumları tabana göre değişmedi.
+- **Bellek:** tepe kullanım 1641 MB (en büyük `qemu-system-arm` ~515 MB); kullanılabilir bellek hep > 5900 MB.
+- **DHCP port sahipliği varsayımı (root olmayan, durdurulmuş `-S` `qemu-system-arm`, `-netdev user,restrict=on,hostfwd=tcp:127.0.0.1:15999-:80`):**
+  `ss -Htlnp "sport = :15999"` dinleyiciyi kendi pid'iyle `qemu-system-arm` olarak gösterir. Port zaten tutuluyorsa (127.0.0.1 ya da 0.0.0.0) QEMU 1 koduyla çıkar: "Could not set up host forwarding rule".
+
+**Hâlâ doğrulanmayanlar**
+
+- DHCP/user-net modu **gerçek firmware ile** (iki örnek de tetiklemiyor).
+- `analyze` / `debug` / `run` / `boot` modları.
+- H'nin çıkış kodu ayrıca yakalanmadı.

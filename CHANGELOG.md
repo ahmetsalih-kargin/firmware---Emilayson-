@@ -6,6 +6,51 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 2.10 / 5.1 / 4.2 — port discovery, DHCP host ports, `firmae.qemu` (2026-11-17)
+
+Uncommitted working-tree changes ("group 1"). Verified by unit tests only; the DHCP mode and the
+new `firmae.qemu` start path have **not** been run with a real firmware / real QEMU (no real run had been made when this was written (the first attempt produced no measurement because WSL crashed)).
+
+- **`findPorts` (2.10), behaviour change.** It now parses the kernel's real 4.1 log format
+  (`inet_bind[PID: n (name)]: proto:SOCK_X, port:N`; no address is logged, `0.0.0.0` is assumed) as well as the
+  old format. Port 0 and ports >= 32768 (ephemeral) are dropped, repeats of the same (proto, port) collapse
+  (first bind wins), at most `MAX_PORTS = 256` entries. Real fixtures: DIR-868L udp 19541, 5353, 67, 5355, 137, 53,
+  1900 and tcp 4433, 443, 53, 8181, 80, 8182; WNAP320 tcp 80, 443, 22 and udp 161, 137, 138. The generated TAP-mode
+  `run.sh` is unchanged (both `tests/fixtures/generated/*.expected` files are byte-identical to HEAD).
+- **`qemuCmd(..., hostfwd=)` signature (5.1).** `qemuCmd`, `qemuNetworkConfig` and `qemuArchNetworkConfig` take
+  `hostfwd=[(proto, guest port, host port), ...]` (plus `iid`); `None` means "choose with `chooseHostPorts`", `[]`
+  means `restrict=on` with no forward rule. The forwards go to one NIC only: the first with a DHCP address (a host port
+  cannot be forwarded twice). Existing callers keep working.
+- **Audit follow-ups (same day, verified in code; not run with a real DHCP firmware).** New `scripts/hostfwd_check.sh` (sourced by `check_emulation.sh` and `run_mode.sh`): before each probe it checks that the emulation is alive (`qemu_pids`, run.sh pid, zombie check) and after a successful answer that the port's owner is this IID's QEMU (`ss -Htlnp`); no `ss` / unreadable pid gives `web=false` + a warning (before: a foreign process holding the chosen port, while QEMU refused to start, was counted as `web=true`). That a slirp listener shows up under QEMU's pid in `ss -p` is NOT verified. `run_mode.sh`: for a DHCP image (`isDhcp`) analyze is refused without running any tool (exit 60, `ExitCode.ANALYSIS`), debug is refused (exit 50), run mode probes only the mapped ports; TAP branches unchanged. `makeNetwork.py`: the rules go to a user NIC that was really placed (`qemuNetworkConfigAndHostfwd`) and `scratch/<IID>/hostfwd` is read back from the generated run.sh's `-netdev` lines (`hostfwdRulesIn`), so a file means the rules are in QEMU's arguments; `hostfwdBlock` uses the whole IID. Still open: `debug.py`, `analyses/*`, `util/collect_result.py` without DHCP support, and the "Network reachable on 127.0.0.1" message in `firmae/pipeline.py`.
+- **DHCP / user-network host ports (5.1).** Host ports come from 127.0.0.1 ports 10000-19999, starting at a
+  per-image block of 40 (`hostfwdBlock`), each one checked free by binding it. The mapping is written to
+  `scratch/<IID>/hostfwd` (`<tcp|udp> <guest> <host>` per line, symlinks not followed); `run.sh` re-checks the TCP
+  host ports before QEMU starts (the check-to-bind race is accepted). `scripts/check_emulation.sh` (DHCP branch)
+  validates that file strictly and probes only `http://127.0.0.1:<host port of 80>` / `https://127.0.0.1:<host port of 443>`,
+  never the host's own port 80 (fixes the false-positive `web=true`). In DHCP mode `ping` means "web answered"
+  and on success `ip` is `127.0.0.1` (the host: analysis tools that take that address as the target are
+  still wrong in this mode, see `REFACTORING_PLAN.md` "Takip gerekir").
+- **`firmae/qemu.py` (4.2).** `build_initial_argv` / `main`: `python3 -I <kurulum>/firmae/qemu.py initial <arch> <IID> <QEMU_INIT>` (cwd and `PYTHON*` stay off the module path);
+  `scripts/run.{armel,mipseb,mipsel}.sh` are thin wrappers. The process ends in `os.execvpe` (no shell or Python
+  process stays in between; the old Bash left one). Behaviour differences from the old scripts: `FIRMAE_NET` /
+  `FIRMAE_KERNEL` accept only `true` / `false` (they were run as commands); `firmae.config` is found from the
+  script's tree, not the working directory; IIDs such as `+5` or ` 5` are rejected; a `FIRMAE_DIR` containing spaces
+  works; SIGPIPE / SIGXFSZ are reset to default before exec. The wrapper runs `python3 -I` on the file (cwd and `PYTHON*`
+  variables stay off the module path; `qemu.py` appends the install root to the END of `sys.path`), so a fake `firmae/` package in the
+  current directory no longer replaces the real code (an audit finding against the earlier `python3 -m firmae.qemu` call); users can no longer
+  redirect `firmae` with `PYTHONPATH`. The deliberate differences are tested separately (`tests/unit/golden_old_quirks.json`): a leading-zero IID
+  (`08`, `09`) and a `FIRMAE_NET` other than `true`/`false` are rejected (the old scripts still started QEMU; `FIRMAE_NET=yes` ran `/usr/bin/yes` and hung).
+- **Tests.** `tests/unit/test_qemu_cmd.py`: the user-network test passes explicit `hostfwd=` ports (`127.0.0.1:10000-:80`
+  ...) and keeps its claim (`restrict=on`, every forward on 127.0.0.1, none on 0.0.0.0 or with an empty address); a new test
+  covers `hostfwd=None` and `hostfwd=[]`. The `/proc/<pid>/stat` read race (the one fixed in `test_audit_fixes.py`) is
+  closed the same way in `test_procgroup.py`, `test_lifecycle_functions.py`, `test_pipeline.py` and
+  `test_pipeline_hwprofile.py`: a vanished process or an empty / truncated `stat` counts as "process gone"; no assertion
+  was weakened.
+
+### Test and docs fixes (2026-11-17)
+
+- `tests/unit/test_audit_fixes.py`: `test_normal_exit_leaves_no_background_process_behind` was flaky (12/100 and 6/150 runs failed with `ProcessLookupError` from reading `/proc/<pid>/stat` of a process being reaped); the race is closed, the assertion is unchanged (0/200 failures afterwards, TEST_REPORT.md section G). `REFACTORING_PLAN.md` now has a step-by-step status table; stale "not committed" / "428 tests" / "Phase 6 not started" statements in the plan, SECURITY.md, TEST_REPORT.md and ARCHITECTURE.md were corrected (no code change).
+
 ### Phase 6.1 — hardware profile (2026-11-16)
 
 A new, purely informational pipeline step that records which peripherals a firmware
