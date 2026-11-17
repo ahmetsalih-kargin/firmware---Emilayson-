@@ -1,0 +1,4 @@
+[    0.500000] firmadyne: sys_socket[PID: 77 (udevd)]: family:1, type:2, protocol:0
+[    0.510000] firmadyne: inet_bind[PID: 362 (lighttpd)]: proto:SOCK_STREAM, port:80
+Starting httpd ... done
+[ 10.0] firmadyne: devfs: 1, execute: 1, procfs: 1, syscall: 1

@@ -1,0 +1,5 @@
+/dev/nvram: No such device
+/dev/nvram: No such device
+wifia0: WLC_GET_VAR(chanspec): No such device
+ifconfig: SIOCSIFTXQLEN: No such device
+/usr/local/bin/wlanconfig: ioctl: No such device

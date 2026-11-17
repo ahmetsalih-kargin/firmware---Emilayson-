@@ -1,0 +1,13 @@
+[ 100.0] firmadyne: inet_bind[PID: 100 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 101.0] firmadyne: inet_bind[PID: 101 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 102.0] firmadyne: inet_bind[PID: 102 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 103.0] firmadyne: inet_bind[PID: 103 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 104.0] firmadyne: inet_bind[PID: 104 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 105.0] firmadyne: inet_bind[PID: 105 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 106.0] firmadyne: inet_bind[PID: 106 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 107.0] firmadyne: inet_bind[PID: 107 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 108.0] firmadyne: inet_bind[PID: 108 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 109.0] firmadyne: inet_bind[PID: 109 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 110.0] firmadyne: inet_bind[PID: 110 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 111.0] firmadyne: inet_bind[PID: 111 (ntpclient)]: proto:SOCK_DGRAM, port:0
+[ 1.0] firmadyne: sys_socket[PID: 5 (x)]: No such device

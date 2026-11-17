@@ -1,0 +1,3 @@
+kobject_add_internal failed for gpio with -EEXIST, dont try to register things with the same name
+sysfs: cannot create duplicate filename '/class/gpio'
+[/etc/init.d/S45gpiod.sh]

@@ -1,0 +1,2 @@
+insmod: can't insert '/lib/modules/nf_nat_proto_gre.ko': unknown symbol in module, or unknown parameter
+iptables v1.4.7: can't initialize iptables table `nat': Table does not exist (do you need to insmod?)

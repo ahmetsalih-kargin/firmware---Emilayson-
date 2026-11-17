@@ -1,0 +1,3 @@
+mount: mounting /dev/mtdblock/4 on /htdocs/web/js/localization failed: Invalid argument
+Error Writing device /dev/mtd5.
+Creating 11 MTD partitions on "NAND 128MiB 1,8V 8-bit":
