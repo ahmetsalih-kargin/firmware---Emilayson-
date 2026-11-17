@@ -39,13 +39,20 @@ Security (the tarball is attacker-controlled; this may run as root):
     header can ask for a 4 GiB dictionary); gzip (32 KiB window) and bzip2
     (at most 900 kB blocks) need little memory by format;
   * a malformed tarball gives a partial result with "read_error" (or
-    TarballError when not even the first member could be read), a
-    MemoryError during the scan gives a partial result with "memory";
-  * the CLI additionally caps its own address space (RLIMIT_AS,
-    --mem-limit-mb, default DEFAULT_MEM_LIMIT_MB, 0 = off; POSIX only; the
-    library functions never change the caller's limits) as a second layer
-    for whatever the bounds above do not foresee, and never prints a
-    traceback: an unexpected error is one "hwprofile: error:" line, exit 1;
+    TarballError when not even the first member could be read);
+  * the CLI entry point (python3 -m firmae.hwprofile; the library functions
+    never change the caller's limits) adds a second layer for whatever the
+    bounds above do not foresee: it caps its own address space (RLIMIT_AS,
+    --mem-limit-mb, default DEFAULT_MEM_LIMIT_MB, 0 = off; POSIX only) and,
+    on Linux, stops the scan with "memory" (partial result) once the
+    address space (/proc/self/statm, checked in the stream reader) passes
+    75% of that limit -- before the hard limit, because a MemoryError at the
+    hard limit can leave CPython spinning in C. A MemoryError that happens
+    anyway still gives a partial result when it can. Last resort: a
+    faulthandler watchdog thread ends the process with exit 1 (no output)
+    HARD_GRACE seconds after --timeout, whatever the main thread is doing;
+  * the CLI never prints a traceback: an unexpected error is one
+    "hwprofile: error:" line, exit 1;
   * the written JSON is at most MAX_PROFILE_BYTES: sample lists and keys of
     the static/dynamic sections are trimmed ("profile_size" in limits_hit),
     the peripherals section is computed before trimming and kept whole;
@@ -126,6 +133,14 @@ MAX_PAX_GLOBAL_KEYS = 1000        # keys of the global pax headers kept by tarfi
 MAX_XZ_MEMORY = 128 << 20         # xz decoder memory limit (xz -9 needs ~65 MiB)
 MAX_PROFILE_BYTES = 2 << 20       # size of the written JSON
 DEFAULT_MEM_LIMIT_MB = 1536       # CLI: RLIMIT_AS of the process (0 = not set)
+MEM_RESERVE = 8 << 20             # CLI under RLIMIT_AS: freed on MemoryError, headroom to finish
+HARD_GRACE = 30.0                 # CLI: seconds after --timeout before the process is ended
+# Holds the reserve (one bytearray) while the CLI runs under RLIMIT_AS; a list
+# so that a MemoryError handler can drop it with clear(), allocating nothing.
+_RESERVE = []
+# CLI only: [address-space bytes at which the scan stops, fd of /proc/self/statm]
+_MEM_GUARD = [0, None]
+_HARD_DEADLINE_FILE = []
 MAX_KEYS = 2000                   # distinct keys per dict / entries per list
 MAX_SAMPLE_FILES = 5              # member names kept per key
 MAX_STR = 256                     # length of every firmware-derived string
@@ -397,6 +412,49 @@ def _member_path(name):
 
 # ---------------------------------------------------------------- stream
 
+def _check_memory():
+    """Soft memory guard of the CLI: stop the scan (a clean _Stop, raised by
+    our own reader) while the address space is still below RLIMIT_AS.
+    Reaching the hard limit is not a reliable way out: CPython can spin in C
+    re-raising the MemoryError (seen in tarfile's `raise e` with VmSize pinned
+    at the limit) where no Python-level deadline check runs."""
+    try:
+        pages = int(os.pread(_MEM_GUARD[1], 64, 0).split(None, 1)[0])
+    except (OSError, ValueError, IndexError):
+        return
+    if pages * _PAGE > _MEM_GUARD[0]:
+        raise _Stop("memory")
+
+
+_PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _arm_mem_guard(limit_bytes):
+    """Stop scanning at 75% of limit_bytes (or limit - 64 MiB, the lower one),
+    measured from /proc/self/statm; silently off where that does not exist."""
+    if not hasattr(os, "pread"):
+        return
+    try:
+        fd = os.open("/proc/self/statm", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return
+    _MEM_GUARD[:] = [min(limit_bytes * 3 // 4, limit_bytes - (64 << 20)), fd]
+
+
+def _arm_hard_deadline(seconds):
+    """CLI only: end the process (exit 1) `seconds` from now whatever it is
+    doing, from faulthandler's C watchdog thread: --timeout then also holds
+    when the main thread is stuck in C code. The thread dump goes to
+    /dev/null (no traceback on the terminal)."""
+    try:
+        import faulthandler
+        f = open(os.devnull, "w")
+        faulthandler.dump_traceback_later(seconds, exit=True, file=f)
+    except Exception:
+        return
+    _HARD_DEADLINE_FILE[:] = [f]
+
+
 class _Budget:
     def __init__(self, deadline):
         self.deadline = deadline
@@ -432,6 +490,7 @@ class _BoundedReader:
         self._end = 0              # bytes pulled from raw
         self._hist = bytearray()   # raw bytes [end - len(hist), end)
         self._header = None        # header bytes of the current next(), or None
+        self._reads = 0
 
     def begin_header(self):
         self._header = 0
@@ -459,6 +518,9 @@ class _BoundedReader:
             self._header += n
             if self._header > MAX_HEADER_BYTES:
                 raise _Stop("header_size")
+        self._reads += 1
+        if _MEM_GUARD[0] and (n >= 65536 or not self._reads & 63):
+            _check_memory()
         parts = []
         if self._pos < self._end and n > 0:
             start = len(self._hist) - (self._end - self._pos)
@@ -740,6 +802,7 @@ def scan_tarball(path, *, deadline=None):
     except RecursionError:                 # pax / long-name chains recurse in tarfile
         hit = "header_nesting"
     except MemoryError:
+        _RESERVE.clear()                   # headroom for the partial result and the write
         hit = "memory"
     except Exception as e:                 # TarError, OSError, EOFError, zlib/lzma errors, and
         if st.scanned_members == 0:        # whatever else tarfile raises on a malformed header
@@ -1165,6 +1228,14 @@ def _set_mem_limit(mb):
     return None
 
 
+def _current_as_limit():
+    try:
+        soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+    except Exception:
+        return 0
+    return 0 if soft == resource.RLIM_INFINITY else soft
+
+
 def main(argv=None, set_rlimit=False):
     """CLI entry point; returns the exit code. Never prints a traceback:
     an unexpected error becomes one error line and exit 1 (KeyboardInterrupt
@@ -1174,6 +1245,7 @@ def main(argv=None, set_rlimit=False):
     try:
         return _main(argv, set_rlimit)
     except MemoryError:
+        _RESERVE.clear()
         hit = "out of memory"
     except RecursionError:
         hit = "recursion limit reached"
@@ -1210,9 +1282,17 @@ def _main(argv, set_rlimit):
 
     t0 = time.monotonic()
     notes = []
+    if set_rlimit:
+        _arm_hard_deadline(args.timeout + HARD_GRACE)
     more = _set_mem_limit(args.mem_limit_mb) if set_rlimit else None
     if more:
         notes.append(more)
+    elif set_rlimit and args.mem_limit_mb:
+        _arm_mem_guard(_current_as_limit() or (args.mem_limit_mb << 20))
+        # Should a MemoryError still happen (outside the guarded reads), freeing
+        # this gives room to build and write the partial profile. Untouched
+        # pages: no RSS.
+        _RESERVE[:] = [bytearray(MEM_RESERVE)]
     try:
         if args.update:
             static = _read_profile(args.out)["static"]

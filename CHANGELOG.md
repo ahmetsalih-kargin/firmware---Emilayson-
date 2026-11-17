@@ -58,6 +58,12 @@ firmwares (DIR-868L ARM, WNAP320 MIPS).
     `dynamic.modules`.
   - Tests: new `tests/unit/test_hwprofile_integration.py` (real `python3 -m firmae.hwprofile`
     on a synthetic tarball and a recorded serial log); `test_pipeline_hwprofile.py` extended.
+- **After the commit (2026-11-17), profiler CLI only:** a process that reached `RLIMIT_AS` could spin
+  at 100% CPU inside `tarfile` and ignore `--timeout` (flaky `test_cli_rlimit_catches_what_the_bounds_miss`).
+  The CLI now stops the scan with `limits_hit: memory` at 75% of `--mem-limit-mb` (Linux, `/proc/self/statm`),
+  ends the process with exit 1 `--timeout` + 30 s after start as a last resort, and keeps an 8 MiB reserve for
+  a `MemoryError`. Library functions, pipeline arguments and the profile schema are unchanged. Test count
+  769 -> 772 (TEST_REPORT.md, "Faz 6.1", F).
 - **SECURITY.md:** S26 (attack surface of the profiler), updated with the audit findings.
 - **Documentation:** `ARCHITECTURE.md` section 9 corrected: libnvram replaces the firmware's own
   nvram API symbols and does not intercept libc `open`/`ioctl`; the instrumented, downloaded

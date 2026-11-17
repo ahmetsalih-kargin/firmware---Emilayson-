@@ -536,7 +536,7 @@ fark (önceki commit'e göre) şablondaki 16 satırlık denetim bloğu
 
 ### A) Birim testleri
 
-WSL2 Ubuntu, Python 3.12.3: **428 → 769 test, hepsi geçiyor.** Python 3.8 ile **koşulmadı**.
+WSL2 Ubuntu, Python 3.12.3: **428 → 769 test, hepsi geçiyor** (F altındaki düzeltmeden sonra 772; 769 ilk ölçümdür). Python 3.8 ile **koşulmadı**.
 Yeni dosyalar: `test_hwprofile.py` (204 test), `test_hwserial.py` (62),
 `test_pipeline_hwprofile.py` ve `test_hwprofile_integration.py` (gerçek
 `python3 -m firmae.hwprofile` ile bütünleşme).
@@ -632,3 +632,40 @@ B: [hw] watchdog=failing mtd=failing gpio=not-referenced nvram=not-referenced i2
 - Docker modu.
 - Daha geniş firmware seti.
 - Kernel gpio/watchdog kanca kayıt hatalarının nedeni.
+
+### F) Commit sonrası bulunan kararsızlık: bellek sınırında takılma
+
+**Belirti.** Commit `715f226` içeriğinde tam takım 3 koşunun 1'inde `test_cli_rlimit_catches_what_the_bounds_miss`
+yüzünden kaldı; test tek başına 5 koşunun 1'inde 116,57 s sürüp kaldı. `--timeout` da tutmadı.
+
+**Kök neden (kısmen kanıtlı).** `RLIMIT_AS` sınırına çarpan süreç ara sıra %100 CPU'da dönüyordu;
+faulthandler dökümü `tarfile.py … in next` içinde, `MemoryError`'ın yeniden fırlatıldığı yolu gösterdi.
+Süreç sert sınırdayken Python düzeyindeki süre denetimi hiç çalışmıyordu. **CPython içinde tam olarak
+neyin döndüğü kanıtlanmadı: C yığını alınmadı.**
+
+**Düzeltme (yalnız CLI; kütüphane fonksiyonları, pipeline argümanları ve profil şeması aynı; `git diff HEAD` okunarak denetlendi).**
+1. Yumuşak bekçi: `/proc/self/statm` ile adres alanı, `--mem-limit-mb` değerinin %75'ini (veya sınır - 64 MiB, hangisi küçükse) geçince akış okuyucusu taramayı `limits_hit: memory` ile temiz bitirir.
+2. Sert son çare: faulthandler bekçi iş parçacığı `--timeout` + 30 s sonra süreci çıkış 1 ile bitirir; döküm `/dev/null`'a gider, terminale traceback basılmaz.
+3. `MemoryError` için 8 MiB yedek: hata anında bırakılır, kısmi profil yazmaya yer kalır.
+
+Yeni testler: `test_cli_hard_deadline_ends_a_stuck_process`, `test_memory_guard_stops_the_scan`,
+`test_memory_error_drops_the_reserve`; kararsız test süre üst sınırı (25 s) ve ayrıntılı hata iletisi kazandı. Toplam 769 → 772.
+
+**Düzeltmeyi yazanın ölçümü (bağımsız doğrulanmadı):** Python ebeveynli alt süreçte yeniden üretim önce 8/8 takılma;
+düzeltmeden sonra 25/25 koşu 0,3-0,5 s.
+
+**Bağımsız doğrulama (WSL2 Ubuntu, Python 3.12.3, çalışma ağacının kopyası):**
+
+| Ölçüm | Sonuç |
+|---|---|
+| `-k rlimit` (4 test) 40 kez döngü | 0 hata; koşu başına en uzun süre 1,99 s (pytest başlangıcı dahil) |
+| Tam takım, 2 koşu | 772 passed (104,96 s ve 100,47 s); eski kararsız `test_normal_exit_leaves_no_background_process_behind` bu koşularda kalmadı |
+| DIR-868L `1.tar.gz`, `python3 -m firmae.hwprofile` | çıkış 0, 1,52 s, tepe RSS 31 MB (beklenen ~22 MB'tan yüksek, **nedeni incelenmedi**), `limits_hit` boş; gpio/wlan referenced, nvram/mtd/uart covered, i2c/spi/watchdog/led not-referenced |
+| Denetçinin sparse PoC'si (`gen.py sparse10 … 2`, `ulimit -v 4000000`, varsayılan 1536 MB) | çıkış 0, 0,22 s, RSS 35,7 MB, `limits_hit` `header_size` |
+
+PoC'yi yapısal başlık sınırı yakalıyor; yumuşak bekçiyi **bu girdi sınamıyor**. Bekçiyi sınayan,
+başlık sınırını kapatan birim testidir (yukarıdaki 40 koşu).
+
+**Kısıtlar.** Bekçi Linux'a özgü (`/proc`); başka yerde kapalı, yalnız sert son çare ve `RLIMIT_AS` kalır.
+Sert sınırdaki dönme kendi başına duruyor; bekçi ondan önce durdurarak kaçınıyor, dönmeyi gidermiyor.
+Sert son çare yalnız sahte `scan_tarball` ile sınandı. **Bu düzeltme için ikinci bağımsız denetim yapılmadı.**

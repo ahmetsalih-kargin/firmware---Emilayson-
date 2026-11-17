@@ -947,15 +947,63 @@ def test_cli_xz_bomb_under_small_rlimit(tmp_path):
 @needs_rlimit
 def test_cli_rlimit_catches_what_the_bounds_miss(tmp_path):
     """Second layer alone: with the header bound switched off, the sparse map
-    runs into RLIMIT_AS; the CLI writes a partial profile ("memory"), exit 0."""
+    grows until the memory guard (75% of RLIMIT_AS) stops the scan; the CLI
+    writes a partial profile ("memory"), exit 0, in a few seconds.
+    (This used to run into the hard limit itself; there CPython sometimes spun
+    for minutes re-raising the MemoryError inside tarfile.)"""
+    # 48 MiB of map need ~450 MB as Python objects, far above the 200 MiB limit.
     tar = _sparse10_bomb(tmp_path / "sp.tar.gz", 48)
     out = tmp_path / "sp.json"
     code = ("import sys; from firmae import hwprofile as hp; hp.MAX_HEADER_BYTES = 1 << 50; "
             "sys.exit(hp.main(sys.argv[1:], set_rlimit=True))")
-    r = _cli(["--tar", tar, "--out", str(out), "--mem-limit-mb", "200"], code=code, timeout=120)
-    assert r.returncode == 0, r.stderr
-    assert b"Traceback" not in r.stderr
-    assert json.loads(out.read_text())["static"]["limits_hit"] == ["memory"]
+    t = time.monotonic()
+    r = _cli(["--tar", tar, "--out", str(out), "--mem-limit-mb", "200", "--timeout", "30"],
+             code=code, timeout=120)
+    took = time.monotonic() - t
+    what = "rc=%d %.1fs stdout=%r stderr=%r" % (r.returncode, took, r.stdout[-2000:], r.stderr[-4000:])
+    assert r.returncode == 0, what
+    assert b"Traceback" not in r.stderr, what
+    assert json.loads(out.read_text())["static"]["limits_hit"] == ["memory"], what
+    assert took < 25, what
+
+
+@needs_rlimit
+def test_cli_hard_deadline_ends_a_stuck_process(tmp_path):
+    """Whatever the main thread is stuck in, the CLI ends HARD_GRACE seconds
+    after --timeout with exit 1 and no traceback."""
+    code = ("import sys, time; from firmae import hwprofile as hp; hp.HARD_GRACE = 0.5; "
+            "hp.scan_tarball = lambda *a, **k: time.sleep(60); "
+            "sys.exit(hp.main(sys.argv[1:], set_rlimit=True))")
+    t = time.monotonic()
+    r = _cli(["--tar", _tar(tmp_path), "--out", str(tmp_path / "o.json"), "--timeout", "1"],
+             code=code, timeout=30)
+    assert r.returncode == 1 and time.monotonic() - t < 15
+    assert r.stdout == b"" and b"Traceback" not in r.stderr
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/statm") or not hasattr(os, "pread"),
+                    reason="Linux /proc")
+def test_memory_guard_stops_the_scan(tmp_path, monkeypatch):
+    fd = os.open("/proc/self/statm", os.O_RDONLY)
+    try:
+        monkeypatch.setattr(hp, "_MEM_GUARD", [1, fd])         # any process is above 1 byte
+        tar = make_tar(tmp_path / "1.tar.gz", [("./a", "file", b"x" * (1 << 17))])
+        s = hp.scan_tarball(tar)
+        assert s["limits_hit"] == ["memory"]
+        monkeypatch.setattr(hp, "_MEM_GUARD", [0, None])        # off: library default
+        assert hp.scan_tarball(tar)["limits_hit"] == []
+    finally:
+        os.close(fd)
+
+
+def test_memory_error_drops_the_reserve(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "_RESERVE", [bytearray(16)])
+
+    def boom(self):
+        raise MemoryError()
+    monkeypatch.setattr(tarfile.TarFile, "next", boom)
+    s = hp.scan_tarball(_many_files(tmp_path, 2))
+    assert s["limits_hit"] == ["memory"] and hp._RESERVE == []
 
 
 @needs_rlimit
