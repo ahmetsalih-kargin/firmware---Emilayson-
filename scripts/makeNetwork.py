@@ -2,6 +2,7 @@
 
 import sys
 import getopt
+import ipaddress
 import re
 import struct
 import socket
@@ -23,10 +24,13 @@ SCRIPTDIR = ""
 
 # ---------------------------------------------------------------------------
 # Untrusted input. The serial log and the image are written by the emulated
-# firmware, and run.sh (generated from them) runs as root on the host. Every
-# value that reaches QEMUCMDTEMPLATE is checked against a whitelist, once when
-# it is parsed (bad records are skipped) and again in qemuCmd() (bad values
-# raise), so no log line can become shell code.
+# firmware, and the final emulation (scratch/<IID>/run.sh -> scripts/emulate.sh)
+# runs as root on the host. No shell code is generated from them any more:
+# run.sh is a fixed wrapper and the per-image values go to the data file
+# scratch/<IID>/emulation.conf. Every value is checked against a whitelist when
+# it is parsed (bad records are skipped), again in qemuCmd() / checkEmulation()
+# before the file is written (bad values raise), and a third time by
+# scripts/emulate.sh when it reads the file.
 # ---------------------------------------------------------------------------
 
 # Linux interface names: at most IFNAMSIZ-1 = 15 bytes. ':' is kept for alias
@@ -68,10 +72,11 @@ HOSTFWD_BLOCK = 40
 HOSTFWD_FILE = "hostfwd"   # scratch/<IID>/hostfwd: "<proto> <guest port> <host port>" per line
 INFER_DEFAULT_TIMEOUT = 600   # seconds for scripts/inferDefault.py
 MAX_WARNINGS = 5        # per parser call, so a flood of bad lines cannot flood the log
+_THIS_NETWORK = ipaddress.IPv4Network("0.0.0.0/8")
 
 
 class UnsafeValue(ValueError):
-    """A firmware-controlled value that must not reach run.sh."""
+    """A firmware-controlled value that must not reach the emulation (run.sh, emulation.conf)."""
 
 
 class UnsafeImagePath(Exception):
@@ -88,6 +93,74 @@ def isIfname(name):
 
 def isIpv4(ip):
     return isinstance(ip, str) and IPV4_RE.match(ip) is not None
+
+
+# Guest addresses come from the guest's serial log. The host probes them as
+# root (check.py: curl, ping) and emulate.sh puts the derived host address on
+# a TAP device and routes the guest address there, so an address that names
+# the host itself or no single host must never get that far. One definition,
+# mirrored by firmae/check.py (usable_guest_ip) and scripts/emulate.sh
+# (emu_guest_ipv4); tests/unit/test_network_parse.py checks that all three agree.
+def unusableGuestIpReason(ip):
+    """None if `ip` (dotted quad) is an acceptable guest IPv4 address (private
+    or public unicast), else why not: loopback (127/8), unspecified or "this
+    network" (0/8), multicast (224/4), link-local (169.254/16), reserved
+    (240/4) or the limited broadcast 255.255.255.255."""
+    if not isIpv4(ip):
+        return "not an IPv4 address"
+    a = ipaddress.IPv4Address(ip)
+    if a == ipaddress.IPv4Address("255.255.255.255"):
+        return "limited broadcast"
+    if a.is_loopback:
+        return "loopback"
+    if a.is_unspecified or a in _THIS_NETWORK:
+        return "unspecified / this network (0.0.0.0/8)"
+    if a.is_multicast:
+        return "multicast"
+    if a.is_link_local:
+        return "link-local"
+    if a.is_reserved:
+        return "reserved"
+    return None
+
+
+def isGuestIpv4(ip):
+    return unusableGuestIpReason(ip) is None
+
+
+def dropHostIpCollisions(networkList):
+    """networkList without the entries whose guest address would equal a
+    host-side address (convertToHostIp) of the same layout, in order: an entry
+    is kept only if its guest address is none of the host addresses kept so far
+    and its host address is none of the guest addresses kept so far. (Guest
+    192.168.0.1 and 192.168.0.2 map to host .2 and .1: probing either guest
+    address would reach the host's own TAP address.) Dropped entries are logged."""
+    kept, guests, hosts = [], set(), set()
+    for n in networkList:
+        ip = n[0]
+        host = convertToHostIp(ip)
+        if ip in hosts or host in guests:
+            print("[!] Warning: dropped network %r: guest address %s collides with a "
+                  "host-side TAP address of this layout" % (n, ip))
+            continue
+        kept.append(n)
+        guests.add(ip)
+        hosts.add(host)
+    return kept
+
+
+def usableNetworkList(networkList):
+    """The networks process() may write: guest address accepted by
+    isGuestIpv4 (the parsers already drop the others; this also covers
+    addresses that checkNetwork substitutes) and no guest/host collision."""
+    usable = []
+    for n in networkList:
+        reason = unusableGuestIpReason(n[0])
+        if reason is not None:
+            print("[!] Warning: dropped network %r: %s, not a usable guest address" % (n, reason))
+            continue
+        usable.append(n)
+    return dropHostIpCollisions(usable)
 
 
 def _isInt(v, lo, hi):
@@ -182,152 +255,75 @@ def openImageFile(path, mode):
         os.close(fd)
         raise
 
-QEMUCMDTEMPLATE = """#!/bin/bash
+# ---------------------------------------------------------------------------
+# Final emulation: scratch/<IID>/run.sh + scratch/<IID>/emulation.conf.
+#
+# run.sh used to be a whole Bash program generated from a template with the
+# firmware's values formatted into it. Now the program is the version-
+# controlled scripts/emulate.sh, run.sh is the fixed wrapper below (its only
+# variable part is the integer IID) and the per-image values are data:
+# emulation.conf, one "KEY=value" record per line, read by emulate.sh with
+# `read` and whitelist regexes only (never sourced, no eval). Key=value instead
+# of JSON: root's Bash can check it with builtins alone (no python3/jq at that
+# point), and the whole grammar is a handful of anchored patterns that are the
+# same here (checkEmulation/parseEmulation) and in emulate.sh.
+#
+#   FORMAT=1
+#   IID=<int>                       must equal the IID run.sh passes
+#   ARCH=arm|mips  ENDIAN=el|eb     armel, mipsel or mipseb
+#   NETWORK_TYPE=<NETWORK_TYPES>    written to /firmadyne/network_type
+#   NET_BRIDGE=<ifname or empty>    ... /firmadyne/net_bridge
+#   NET_INTERFACE=<ifname or empty> ... /firmadyne/net_interface
+#   QEMU_INIT=(rd)init=/<path>      kernel command line
+#   GEN_FIRMAE_NET=true|false       FIRMAE_NET when makeNetwork.py ran (the
+#                                   host side of a VLAN and the guest route
+#                                   depended on it at generation time)
+#   NET=<host ip> <guest ip> <vlan id|->   per network j: TAP tap<IID>_<j>
+#   NIC=tap <j> | NIC=socket <port> | NIC=user [fwd]   per QEMU NIC i, in order
+#   HOSTFWD=<tcp|udp> <guest port> <host port>   rules of the one "user fwd" NIC
+#
+# Lines starting with "#" are comments; anything else that does not match
+# makes emulate.sh refuse to start.
+# ---------------------------------------------------------------------------
 
-set -e
-set -u
+EMULATION_FILE = "emulation.conf"
+EMULATION_FORMAT = 1
+EMULATION_MAX_LINE = 4096     # characters per line, also enforced by emulate.sh
+EMULATION_MAX_LINES = 256
+EMULATION_ARCHS = (("arm", "el"), ("mips", "el"), ("mips", "eb"))
+PLACEHOLDER_PORT_MIN = 20000  # placeholderPort() range
+PLACEHOLDER_PORT_MAX = 59999
 
-ARCHEND=%(ARCHEND)s
-IID=%(IID)i
-
-if [ -e ./firmae.config ]; then
-    source ./firmae.config
-elif [ -e ../firmae.config ]; then
-    source ../firmae.config
-elif [ -e ../../firmae.config ]; then
-    source ../../firmae.config
-else
-    echo "Error: Could not find 'firmae.config'!"
-    exit 1
-fi
-
-RUN_MODE=`basename ${0}`
-
-IMAGE=`get_fs ${IID}`
-if (echo ${ARCHEND} | grep -q "mips" && echo ${RUN_MODE} | grep -q "debug"); then
-    KERNEL=`get_kernel ${ARCHEND} true`
-else
-    KERNEL=`get_kernel ${ARCHEND} false`
-fi
-
-if (echo ${RUN_MODE} | grep -q "analyze"); then
-    QEMU_DEBUG="user_debug=31 firmadyne.syscall=32"
-else
-    QEMU_DEBUG="user_debug=0 firmadyne.syscall=1"
-fi
-
-if (echo ${RUN_MODE} | grep -q "boot"); then
-    QEMU_BOOT="-s -S"
-else
-    QEMU_BOOT=""
-fi
-
-QEMU=`get_qemu ${ARCHEND}`
-QEMU_MACHINE=`get_qemu_machine ${ARCHEND}`
-QEMU_ROOTFS=`get_qemu_disk ${ARCHEND}`
-WORK_DIR=`get_scratch ${IID}`
-
-# Clean up on every exit path -- normal end, error (set -e), Ctrl-C, SIGTERM:
-# stop QEMU, release the image's mount and loop device, and remove the network
-# interfaces, even if START_NET failed half-way.
-# monitor and serial sockets: private directory of this image (was predictable
-# /tmp names; the monitor gives code execution with QEMU's privileges)
-mkdir -p ${WORK_DIR}/run
-chmod 0700 ${WORK_DIR}/run
-rm -f ${WORK_DIR}/run/*.sock
-
-QEMU_PID=""
-IMAGE_ATTACHED=false
-NET_STARTED=false
-stop_net () {
-    true
-%(STOP_NET)s
-}
-cleanup () {
-    local rc=$?
-    trap - EXIT INT TERM HUP
-    set +eu
-    if [ -n "${QEMU_PID}" ]; then
-        kill ${QEMU_PID} 2>/dev/null
-        wait_for_exit ${QEMU_PID} ${QEMU_STOP_GRACE}
-    fi
-    if mountpoint -q ${WORK_DIR}/image; then
-        umount ${WORK_DIR}/image
-    fi
-    if ${IMAGE_ATTACHED}; then
-        del_partition ${DEVICE:0:$((${#DEVICE}-2))}
-    fi
-    if ${NET_STARTED}; then
-        stop_net
-        unisolate_guest_network ${IID}
-    fi
-    echo "Done!"
-    exit ${rc}
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-
-DEVICE=`add_partition "${WORK_DIR}/image.raw"`
-IMAGE_ATTACHED=true
-mount_partition ${DEVICE} ${WORK_DIR}/image > /dev/null
-
-# The guest wrote this file system during earlier runs and the writes below run
-# as root on the host: refuse a symlinked /firmadyne and any target that is not
-# a regular file (a symlink, FIFO or device node would redirect the write).
-GUEST_DIR=${WORK_DIR}/image/firmadyne
-if [ -L "${GUEST_DIR}" ] || [ ! -d "${GUEST_DIR}" ]; then
-    echo "Error: ${GUEST_DIR} is not a plain directory" >&2
-    exit 1
-fi
-for GUEST_FILE in network_type net_bridge net_interface debug.sh; do
-    GUEST_FILE=${GUEST_DIR}/${GUEST_FILE}
-    if [ -L "${GUEST_FILE}" ] || { [ -e "${GUEST_FILE}" ] && [ ! -f "${GUEST_FILE}" ]; }; then
-        echo "Error: ${GUEST_FILE} is not a regular file" >&2
-        exit 1
+# The whole of scratch/<IID>/run.sh. It looks for firmae.config in ., .. and
+# ../.. like the old generated script and execs emulate.sh in the same process
+# (check_emulation.sh waits for run.sh's PID). "${0}" is passed as it was
+# invoked, not resolved: run_debug.sh, run_analyze.sh and run_boot.sh are
+# symlinks to run.sh and the mode is the basename of that name.
+RUN_SH_WRAPPER = """#!/bin/bash
+# Written by scripts/makeNetwork.py for image %(IID)d. No per-image logic here:
+# scripts/emulate.sh runs the emulation with the values in emulation.conf
+# next to this file. Start it from the FirmAE directory as run.sh,
+# run_debug.sh, run_analyze.sh or run_boot.sh.
+for FIRMAE_ROOT in . .. ../..; do
+    if [ -e "${FIRMAE_ROOT}/firmae.config" ]; then
+        exec /bin/bash "${FIRMAE_ROOT}/scripts/emulate.sh" "${0}" %(IID)d "${FIRMAE_ROOT}"
     fi
 done
-
-echo "%(NETWORK_TYPE)s" > ${WORK_DIR}/image/firmadyne/network_type
-echo "%(NET_BRIDGE)s" > ${WORK_DIR}/image/firmadyne/net_bridge
-echo "%(NET_INTERFACE)s" > ${WORK_DIR}/image/firmadyne/net_interface
-
-echo "#!/firmadyne/sh" > ${WORK_DIR}/image/firmadyne/debug.sh
-if (echo ${RUN_MODE} | grep -q "debug"); then
-    echo "while (true); do /firmadyne/busybox nc -lp 31337 -e /firmadyne/sh; done &" >> ${WORK_DIR}/image/firmadyne/debug.sh
-    echo "/firmadyne/busybox telnetd -p 31338 -l /firmadyne/sh" >> ${WORK_DIR}/image/firmadyne/debug.sh
-fi
-chmod a+x ${WORK_DIR}/image/firmadyne/debug.sh
-
-sleep 1
-sync
-umount ${WORK_DIR}/image > /dev/null
-del_partition ${DEVICE:0:$((${#DEVICE}-2))}
-IMAGE_ATTACHED=false
-
-NET_STARTED=true
-%(START_NET)s
-
-# the guest must not open connections to the host or be routed anywhere
-# (rules removed again by cleanup(); see isolate_guest_network in firmae.config)
-isolate_guest_network ${IID}%(HOSTFWD_CHECK)s
-
-# QEMU runs in the background and we `wait` for it: bash does not run traps
-# while a foreground command is running, so Ctrl-C/SIGTERM reach cleanup()
-# immediately. Its exit status does not matter (was: `| true`).
-echo -n "Starting emulation of firmware... "
-%(QEMU_ENV_VARS)s ${QEMU} ${QEMU_BOOT} -m 1024 -M ${QEMU_MACHINE} -kernel ${KERNEL} \\
-    %(QEMU_DISK)s -append "root=${QEMU_ROOTFS} console=ttyS0 nandsim.parts=64,64,64,64,64,64,64,64,64,64 %(QEMU_INIT)s rw debug ignore_loglevel print-fatal-signals=1 FIRMAE_NET=${FIRMAE_NET} FIRMAE_NVRAM=${FIRMAE_NVRAM} FIRMAE_KERNEL=${FIRMAE_KERNEL} FIRMAE_ETC=${FIRMAE_ETC} ${QEMU_DEBUG}" \\
-    -serial file:${WORK_DIR}/qemu.final.serial.log \\
-    -serial unix:${WORK_DIR}/run/serial1.sock,server,nowait \\
-    -monitor unix:${WORK_DIR}/run/monitor.sock,server,nowait \\
-    -display none \\
-    %(QEMU_NETWORK)s &
-QEMU_PID=$!
-wait ${QEMU_PID} || true
-QEMU_PID=""
+echo "Error: Could not find 'firmae.config'!"
+exit 1
 """
+
+EMULATION_HEADER = (
+    "# FirmAE per-image emulation values, written by scripts/makeNetwork.py.\n"
+    "# Data only: scripts/emulate.sh (started by run.sh) checks every line and\n"
+    "# never sources this file.\n")
+
+
+def runShWrapper(iid):
+    """Contents of scratch/<IID>/run.sh."""
+    if not _isInt(iid, 0, 2**31 - 1):
+        raise UnsafeValue("refusing to put IID %r into run.sh" % (iid,))
+    return RUN_SH_WRAPPER % {"IID": iid}
 
 
 def mountImage(targetDir):
@@ -486,6 +482,8 @@ def findNonLoInterfaces(data, endianness):
         fmt = "<I"
     prog = re.compile(rb"^__inet_insert_ifa\[[^\]]+\]: device:([^ ]+) ifa:0x([0-9a-f]+)")
     skipped = []
+    unusable = []       # the first MAX_WARNINGS, for the log
+    unusableCount = 0
     for c in candidates:
         g = prog.match(c)
         if g:
@@ -496,13 +494,26 @@ def findNonLoInterfaces(data, endianness):
                 skipped.append(c)
                 continue
             addr = socket.inet_ntoa(struct.pack(fmt, addr))
-            if addr != "127.0.0.1" and addr != "0.0.0.0":
+            # 127.0.0.1 (lo) and 0.0.0.0 are dropped silently, as always; any
+            # other address the host must not probe or route (isGuestIpv4) is
+            # dropped with a warning
+            if addr != "127.0.0.1" and addr != "0.0.0.0" and not isGuestIpv4(addr):
+                if len(unusable) < MAX_WARNINGS:
+                    unusable.append((iface, addr))
+                unusableCount += 1
+            elif addr != "127.0.0.1" and addr != "0.0.0.0":
                 if len(result) >= MAX_INTERFACES:
                     print("[!] Warning: more than %d interfaces with an address; "
                           "ignoring the rest" % MAX_INTERFACES)
                     break
                 result.append((iface, addr))
     _reportSkipped("interface address", skipped)
+    for (iface, addr) in unusable:
+        print("[!] Warning: skipped interface address %s of %s: %s, not a usable guest address"
+              % (addr, iface, unusableGuestIpReason(addr)))
+    if unusableCount > len(unusable):
+        print("[!] Warning: skipped %d more unusable interface addresses"
+              % (unusableCount - len(unusable)))
     return result
 
 
@@ -608,7 +619,7 @@ def hostPortIsFree(proto, port):
     """True if `port` can be bound on 127.0.0.1 right now. No SO_REUSEADDR, so a
     port with connections in TIME_WAIT counts as taken (conservative). A
     listener on 0.0.0.0:<port> makes this bind fail too. The answer can be
-    stale by the time QEMU binds (TOCTOU): run.sh re-checks the TCP ports and
+    stale by the time QEMU binds (TOCTOU): emulate.sh re-checks the TCP ports and
     QEMU refuses to start on a taken one."""
     kind = socket.SOCK_STREAM if proto == "tcp" else socket.SOCK_DGRAM
     s = socket.socket(socket.AF_INET, kind)
@@ -661,36 +672,23 @@ def chooseHostPorts(iid, ports, isFree=hostPortIsFree, warn=False):
     return result
 
 
-HOSTFWD_RULE_RE = re.compile(r"hostfwd=(tcp|udp):127\.0\.0\.1:([0-9]{1,5})-:([0-9]{1,5})(?=[, ]|\Z)")
-
-
-def hostfwdRulesIn(script):
-    """[(proto, guest port, host port)] of the hostfwd rules in the QEMU
-    arguments of a generated run.sh (its "-netdev" lines). process() records
-    exactly these in scratch/<IID>/hostfwd, so the file can never announce a
-    rule that QEMU does not get. Validated like qemuCmd's input."""
-    rules = []
-    for line in script.splitlines():
-        if "-netdev " in line:
-            rules += [(p, int(g), int(h)) for (p, h, g) in HOSTFWD_RULE_RE.findall(line)]
-    checkHostfwd(rules)
-    return rules
-
-
 def hostfwdText(hostfwd):
     """Contents of scratch/<IID>/hostfwd (read by check_emulation.sh)."""
     return "".join("%s %d %d\n" % (proto, guest, host) for (proto, guest, host) in hostfwd)
 
 
-def writeStateFile(path, text):
+def writeStateFile(path, text, mode=None):
     """Write a scratch/<IID> state file without following a symlink at `path`
-    and without blocking on (or writing into) a FIFO or device node."""
+    and without blocking on (or writing into) a FIFO or device node. `mode`:
+    set these permission bits (fchmod, so also on an existing file)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                 0o644)
+                 0o644 if mode is None else mode)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("%s is not a regular file; not writing it" % path)
         os.set_blocking(fd, True)
+        if mode is not None:
+            os.fchmod(fd, mode)
         os.ftruncate(fd, 0)
         f = os.fdopen(fd, "w")
     except BaseException:
@@ -710,69 +708,48 @@ def removeStateFile(path):
         os.unlink(path)
 
 
-def hostfwdCheck(hostfwd):
-    """Shell lines for run.sh (user network): refuse to start QEMU when one of
-    the chosen TCP host ports has been taken since makeNetwork.py checked it.
-    Only integers validated by checkQemuCmdInputs end up here. Empty for TAP
-    mode, so that run.sh stays byte-for-byte as before."""
-    if not hostfwd:
-        return ""
-    tcp = " ".join(str(host) for (proto, _guest, host) in hostfwd if proto == "tcp")
-    return """
+def _nicDevice(arch):
+    return "virtio-net-device" if arch == "arm" else "e1000"
 
-# user network: these loopback ports were free when makeNetwork.py chose them
-# (scratch/<IID>/hostfwd); stop with a clear error if one has been taken since,
-# QEMU would refuse the hostfwd rule anyway
-for HOSTFWD_PORT in %s; do
-    if (exec 3<>/dev/tcp/127.0.0.1/${HOSTFWD_PORT}) 2>/dev/null; then
-        echo "Error: host port 127.0.0.1:${HOSTFWD_PORT} (hostfwd) is in use; re-run makeNetwork.py to choose other ports" >&2
-        exit 1
-    fi
-done""" % tcp
+
+def nicArgs(arch, i, nic, hostfwd=()):
+    """QEMU arguments of NIC i as scripts/emulate.sh builds them. nic is a
+    record of nicLayout(); hostfwd the rules of a ("user", True) NIC.
+    ${TAPDEV_<j>} stands for the TAP device of network j (tap<IID>_<j>)."""
+    kind = nic[0]
+    head = "-device %s,netdev=net%d -netdev " % (_nicDevice(arch), i)
+    if kind == "socket":
+        return head + "socket,id=net%d,listen=127.0.0.1:%d" % (i, nic[1])
+    if kind == "tap":
+        return head + "tap,id=net%d,ifname=${TAPDEV_%d},script=no" % (i, nic[1])
+    # user network dhcp server
+    # ICMP cannot be forwarded; check_emulation.sh probes the web ports.
+    # restrict=on: the guest cannot reach the host or the outside world
+    # (explicit hostfwd rules are not affected); forwards listen on
+    # loopback only, so the emulated web UI is not exposed to the LAN.
+    # Host ports: chooseHostPorts() (free, per image), not the guest port
+    # numbers. No rules (another NIC carries the forwards: one host port can
+    # be forwarded only once) gives restrict=on alone.
+    fwd = "".join(",hostfwd=%s:127.0.0.1:%d-:%d" % (proto, hostPort, guestPort)
+                  for (proto, guestPort, hostPort) in (hostfwd if nic[1] else ()))
+    return head + "user,id=net%d,restrict=on%s" % (i, fwd)
+
+
+def renderNics(arch, nics, hostfwd):
+    """The QEMU network arguments of a NIC layout, as one string."""
+    return " ".join(nicArgs(arch, i, nic, hostfwd) for i, nic in enumerate(nics))
 
 
 def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0, hostfwd=None):
-    if arch == "arm":
-        device = "virtio-net-device"
-    else:
-        device = "e1000"
-
+    """QEMU arguments of NIC i carrying network n (None: placeholder socket).
+    User network: hostfwd are its rules, None lets chooseHostPorts() pick them."""
     if not n:
-        return (
-            "-device %(DEVICE)s,netdev=net%(I)i -netdev socket,id=net%(I)i,listen=127.0.0.1:%(PORT)i"
-            % {"DEVICE": device, "I": i, "PORT": placeholderPort(iid, i)}
-        )
-    else:
-        (ip, dev, vlan, mac, brif) = n
-        vlan_id = vlan if vlan else i
-        mac_str = "" if not mac else ",macaddr=%s" % mac
-        if isUserNetwork:  # user network dhcp server
-            # ICMP cannot be forwarded; check_emulation.sh probes the web ports.
-            # restrict=on: the guest cannot reach the host or the outside world
-            # (explicit hostfwd rules are not affected); forwards listen on
-            # loopback only, so the emulated web UI is not exposed to the LAN.
-            # Host ports: chooseHostPorts() (free, per image), not the guest
-            # port numbers. hostfwd=[] (another NIC carries the forwards: one
-            # host port can be forwarded only once) gives restrict=on alone.
-            if hostfwd is None:
-                hostfwd = chooseHostPorts(iid, ports)
-            portfwd = "restrict=on,"
-            for (proto, guestPort, hostPort) in hostfwd:
-                portfwd += "hostfwd=%(TYPE)s:127.0.0.1:%(HOST)i-:%(GUEST)i," % {
-                    "TYPE": proto,
-                    "HOST": hostPort,
-                    "GUEST": guestPort,
-                }
-
-            return (
-                "-device %(DEVICE)s,netdev=net%(I)i -netdev user,id=net%(I)i,%(FWD)s"
-                % {"DEVICE": device, "I": i, "FWD": portfwd[:-1]}
-            )
-        else:
-            return (
-                "-device %(DEVICE)s,netdev=net%(I)i -netdev tap,id=net%(I)i,ifname=${TAPDEV_%(TAP_NUM)i},script=no"
-                % {"I": i, "DEVICE": device, "TAP_NUM": tap_num}
-            )
+        return nicArgs(arch, i, ("socket", placeholderPort(iid, i)))
+    if isUserNetwork:
+        if hostfwd is None:
+            hostfwd = chooseHostPorts(iid, ports)
+        return nicArgs(arch, i, ("user", bool(hostfwd)), hostfwd)
+    return nicArgs(arch, i, ("tap", tap_num))
 
 
 def qemuNetworkConfig(arch, network, isUserNetwork, ports, iid=0, hostfwd=None):
@@ -783,6 +760,14 @@ def qemuNetworkConfigAndHostfwd(arch, network, isUserNetwork, ports, iid=0, host
     """(QEMU network arguments, hostfwd rules that are really in them). The
     second value is what scratch/<IID>/hostfwd must record -- [] when no rule
     made it into the arguments (TAP mode, or no user NIC placed)."""
+    nics, placed = nicLayout(arch, network, isUserNetwork, ports, iid, hostfwd)
+    return renderNics(arch, nics, placed), placed
+
+
+def nicLayout(arch, network, isUserNetwork, ports, iid=0, hostfwd=None):
+    """(NICs, hostfwd rules that are really placed). NICs: one record per QEMU
+    NIC, in order -- ("tap", j) for network j in TAP mode, ("user", carries
+    the rules) in user mode, ("socket", loopback port) for a placeholder."""
     interfaceNum = 4
     if arch == "arm" and checkVariable("FIRMAE_NET"):
         interfaceNum = 1
@@ -826,12 +811,17 @@ def qemuNetworkConfigAndHostfwd(arch, network, isUserNetwork, ports, iid=0, host
         placed = [i for i, (_, n) in enumerate(slots) if n is not None]
         fwdSlot = next((i for i in placed if isDhcpIp(slots[i][1][0])),
                        placed[0] if placed else None)
+    rules = list(hostfwd) if fwdSlot is not None else []
 
-    output = []
+    nics = []
     for i, (tap_num, n) in enumerate(slots):
-        fwd = hostfwd if i == fwdSlot else []
-        output.append(qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid, fwd))
-    return " ".join(output), (list(hostfwd) if fwdSlot is not None else [])
+        if n is None:
+            nics.append(("socket", placeholderPort(iid, i)))
+        elif isUserNetwork:
+            nics.append(("user", i == fwdSlot and bool(rules)))
+        else:
+            nics.append(("tap", tap_num))
+    return nics, rules
 
 
 def buildConfig(brif, iface, vlans, macs):
@@ -866,86 +856,11 @@ def convertToHostIp(ip):
     return ".".join([str(x) for x in tups])
 
 
-# iterating the networks
-def startNetwork(network):
-    template_1 = """
-TAPDEV_%(I)i=tap${IID}_%(I)i
-HOSTNETDEV_%(I)i=${TAPDEV_%(I)i}
-echo "Creating TAP device ${TAPDEV_%(I)i}..."
-sudo tunctl -t ${TAPDEV_%(I)i} -u ${USER}
-"""
-
-    if checkVariable("FIRMAE_NET"):
-        template_vlan = """
-echo "Initializing VLAN..."
-HOSTNETDEV_%(I)i=${TAPDEV_%(I)i}.%(VLANID)i
-sudo ip link add link ${TAPDEV_%(I)i} name ${HOSTNETDEV_%(I)i} type vlan id %(VLANID)i
-sudo ip link set ${TAPDEV_%(I)i} up
-"""
-
-        template_2 = """
-echo "Bringing up TAP device..."
-sudo ip link set ${HOSTNETDEV_%(I)i} up
-sudo ip addr add %(HOSTIP)s/24 dev ${HOSTNETDEV_%(I)i}
-"""
-    else:
-        template_vlan = """
-echo "Initializing VLAN..."
-HOSTNETDEV_%(I)i=${TAPDEV_%(I)i}.%(VLANID)i
-sudo ip link add link ${TAPDEV_%(I)i} name ${HOSTNETDEV_%(I)i} type vlan id %(VLANID)i
-sudo ip link set ${HOSTNETDEV_%(I)i} up
-"""
-
-        template_2 = """
-echo "Bringing up TAP device..."
-sudo ip link set ${HOSTNETDEV_%(I)i} up
-sudo ip addr add %(HOSTIP)s/24 dev ${HOSTNETDEV_%(I)i}
-
-echo "Adding route to %(GUESTIP)s..."
-sudo ip route add %(GUESTIP)s via %(GUESTIP)s dev ${HOSTNETDEV_%(I)i}
-"""
-
-    output = []
-    for i, (ip, dev, vlan, mac, brif) in enumerate(network):
-        output.append(template_1 % {"I": i})
-        if vlan != None:
-            output.append(template_vlan % {"I": i, "VLANID": vlan})
-        output.append(
-            template_2 % {"I": i, "HOSTIP": convertToHostIp(ip), "GUESTIP": ip}
-        )
-    return "\n".join(output)
-
-
-def stopNetwork(network):
-    template_1 = """
-echo "Bringing down TAP device..."
-sudo ip link set ${TAPDEV_%(I)i} down
-"""
-
-    template_vlan = """
-echo "Removing VLAN..."
-sudo ip link delete ${HOSTNETDEV_%(I)i}
-"""
-
-    template_2 = """
-echo "Deleting TAP device ${TAPDEV_%(I)i}..."
-sudo tunctl -d ${TAPDEV_%(I)i}
-"""
-
-    output = []
-    for i, (ip, dev, vlan, mac, brif) in enumerate(network):
-        output.append(template_1 % {"I": i})
-        if vlan != None:
-            output.append(template_vlan % {"I": i})
-        output.append(template_2 % {"I": i})
-    return "\n".join(output)
-
-
 def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue, hostfwd=None):
     """Second line of defence: the parsers already drop bad records, but nothing
-    unchecked may ever be formatted into the root shell script."""
+    unchecked may ever reach the data file that the root emulation reads."""
     def bad(what, value):
-        raise UnsafeValue("refusing to put %s %r into run.sh" % (what, value))
+        raise UnsafeValue("refusing to put %s %r into %s" % (what, value, EMULATION_FILE))
 
     if not _isInt(iid, 0, 2**31 - 1):
         bad("IID", iid)
@@ -959,7 +874,7 @@ def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue, hostfwd
         if not isinstance(n, tuple) or len(n) != 5:
             bad("network entry", n)
         (ip, dev, vlan, mac, brif) = n
-        if not isIpv4(ip):
+        if not isGuestIpv4(ip):
             bad("IP address", ip)
         if not isIfname(dev):
             bad("interface name", dev)
@@ -984,48 +899,32 @@ def checkHostfwd(hostfwd):
     if hostfwd is None:
         return
     if not isinstance(hostfwd, list) or len(hostfwd) > 2 + MAX_FORWARD_PORTS:
-        raise UnsafeValue("refusing to put hostfwd list %r into run.sh" % (hostfwd,))
+        raise UnsafeValue("refusing to put hostfwd list %r into %s" % (hostfwd, EMULATION_FILE))
     hosts = set()
     for h in hostfwd:
         if (not isinstance(h, tuple) or len(h) != 3 or h[0] not in ("tcp", "udp")
                 or not _isInt(h[1], 1, 65535)
                 or not _isInt(h[2], HOSTFWD_PORT_MIN, HOSTFWD_PORT_MAX) or h[2] in hosts):
-            raise UnsafeValue("refusing to put hostfwd rule %r into run.sh" % (h,))
+            raise UnsafeValue("refusing to put hostfwd rule %r into %s" % (h, EMULATION_FILE))
         hosts.add(h[2])
 
 
-def qemuCmd(
+def emulationSpec(
     iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
     hostfwd=None,
 ):
-    """run.sh for this image (see qemuCmdAndHostfwd)."""
-    return qemuCmdAndHostfwd(iid, network, ports, network_type, arch, endianness,
-                             qemuInitValue, isUserNetwork, hostfwd)[0]
-
-
-def qemuCmdAndHostfwd(
-    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
-    hostfwd=None,
-):
-    """(run.sh, hostfwd rules that run.sh really passes to QEMU). hostfwd (user
-    network only): the rules from chooseHostPorts(); None lets this function
-    choose them. The second value is the only source for scratch/<IID>/hostfwd
-    (process()): a rule is recorded if and only if it is in the QEMU arguments
-    and in run.sh's port pre-check."""
-    network_bridge = ""
-    network_iface = ""
+    """Everything scripts/emulate.sh needs for this image, as a dict (see
+    EMULATION_FILE for the meaning). hostfwd (user network only): the rules
+    from chooseHostPorts(); None lets this function choose them. spec["hostfwd"]
+    holds only the rules that are really placed on a NIC -- the only source
+    for scratch/<IID>/hostfwd (process())."""
     if arch == "mips":
-        qemuEnvVars = ""
-        qemuDisk = "-drive if=ide,format=raw,file=${IMAGE}"
         if endianness != "eb" and endianness != "el":
             raise Exception("You didn't specify a valid endianness")
     elif arch == "arm":
-        qemuDisk = "-drive if=none,file=${IMAGE},format=raw,id=rootfs -device virtio-blk-device,drive=rootfs"
-        if endianness == "el":
-            qemuEnvVars = "QEMU_AUDIO_DRV=none"
-        elif endianness == "eb":
+        if endianness == "eb":
             raise Exception("armeb currently not supported")
-        else:
+        elif endianness != "el":
             raise Exception("You didn't specify a valid endianness")
     else:
         raise Exception("Unsupported architecture")
@@ -1037,28 +936,231 @@ def qemuCmdAndHostfwd(
         hostfwd = chooseHostPorts(iid, ports)
         checkHostfwd(hostfwd)
 
-    for (ip, dev, vlan, mac, brif) in network:
-        network_bridge = brif
-        network_iface = dev
-        break
-
-    qemuNetwork, placedHostfwd = qemuNetworkConfigAndHostfwd(
-        arch, network, isUserNetwork, ports, iid, hostfwd)
-    script = QEMUCMDTEMPLATE % {
-        "HOSTFWD_CHECK": hostfwdCheck(placedHostfwd),
-        "IID": iid,
-        "NETWORK_TYPE": network_type,
-        "NET_BRIDGE": network_bridge,
-        "NET_INTERFACE": network_iface,
-        "START_NET": startNetwork(network),
-        "STOP_NET": stopNetwork(network),
-        "ARCHEND": arch + endianness,
-        "QEMU_DISK": qemuDisk,
-        "QEMU_INIT": qemuInitValue,
-        "QEMU_NETWORK": qemuNetwork,
-        "QEMU_ENV_VARS": qemuEnvVars,
+    network_bridge = network[0][4] if network else ""
+    network_iface = network[0][1] if network else ""
+    nics, placed = nicLayout(arch, network, isUserNetwork, ports, iid, hostfwd)
+    spec = {
+        "iid": iid,
+        "arch": arch,
+        "endian": endianness,
+        "network_type": network_type,
+        "net_bridge": network_bridge,
+        "net_interface": network_iface,
+        "qemu_init": qemuInitValue,
+        # FIRMAE_NET of this run decides two host-side details of START_NET
+        # (which device a VLAN brings up, and the route to the guest); it is
+        # recorded, not re-read by emulate.sh, exactly as the old generated
+        # script had it baked in
+        "firmae_net": checkVariable("FIRMAE_NET"),
+        "nets": [(convertToHostIp(ip), ip, vlan) for (ip, dev, vlan, mac, brif) in network],
+        "nics": nics,
+        "hostfwd": placed,
     }
-    return script, placedHostfwd
+    checkEmulation(spec)
+    return spec
+
+
+def checkEmulation(spec):
+    """Write-time check of a spec: the same whitelists emulate.sh applies when
+    it reads the file. Raises UnsafeValue."""
+    def bad(what, value):
+        raise UnsafeValue("refusing to put %s %r into %s" % (what, value, EMULATION_FILE))
+
+    if not isinstance(spec, dict):
+        bad("spec", spec)
+    if not _isInt(spec.get("iid"), 0, 2**31 - 1):
+        bad("IID", spec.get("iid"))
+    if (spec.get("arch"), spec.get("endian")) not in EMULATION_ARCHS:
+        bad("architecture", (spec.get("arch"), spec.get("endian")))
+    if spec.get("network_type") not in NETWORK_TYPES:
+        bad("network type", spec.get("network_type"))
+    for key in ("net_bridge", "net_interface"):
+        if spec.get(key) != "" and not isIfname(spec.get(key)):
+            bad(key, spec.get(key))
+    init = spec.get("qemu_init")
+    if (not isinstance(init, str) or not QEMU_INIT_RE.match(init)
+            or len("QEMU_INIT=" + init) >= EMULATION_MAX_LINE):
+        bad("init", init)
+    if not isinstance(spec.get("firmae_net"), bool):
+        bad("FIRMAE_NET", spec.get("firmae_net"))
+    nets = spec.get("nets")
+    if not isinstance(nets, list) or len(nets) > MAX_NETWORKS:
+        bad("network list", nets)
+    for n in nets:
+        if (not isinstance(n, tuple) or len(n) != 3 or not isGuestIpv4(n[0]) or not isGuestIpv4(n[1])
+                or not (n[2] is None or _isInt(n[2], 0, MAX_VLAN_ID))):
+            bad("network", n)
+    # a guest address equal to a host-side address: probes would reach the host
+    hostIps = set(n[0] for n in nets)
+    for n in nets:
+        if n[1] in hostIps:
+            bad("guest address equal to a host address", n)
+    nics = spec.get("nics")
+    if not isinstance(nics, list) or not 1 <= len(nics) <= 4:
+        bad("NIC list", nics)
+    carriers = 0
+    for nic in nics:
+        ok = isinstance(nic, tuple) and len(nic) == 2 and (
+            (nic[0] == "tap" and _isInt(nic[1], 0, len(nets) - 1))
+            or (nic[0] == "socket" and _isInt(nic[1], PLACEHOLDER_PORT_MIN, PLACEHOLDER_PORT_MAX))
+            or (nic[0] == "user" and isinstance(nic[1], bool)))
+        if not ok:
+            bad("NIC", nic)
+        carriers += nic == ("user", True)
+    hostfwd = spec.get("hostfwd")
+    checkHostfwd(hostfwd)
+    if hostfwd is None or carriers != (1 if hostfwd else 0):
+        bad("hostfwd placement", (nics, hostfwd))
+
+
+def emulationText(spec):
+    """Contents of scratch/<IID>/emulation.conf for a spec (checked first)."""
+    checkEmulation(spec)
+    lines = [
+        "FORMAT=%d" % EMULATION_FORMAT,
+        "IID=%d" % spec["iid"],
+        "ARCH=%s" % spec["arch"],
+        "ENDIAN=%s" % spec["endian"],
+        "NETWORK_TYPE=%s" % spec["network_type"],
+        "NET_BRIDGE=%s" % spec["net_bridge"],
+        "NET_INTERFACE=%s" % spec["net_interface"],
+        "QEMU_INIT=%s" % spec["qemu_init"],
+        "GEN_FIRMAE_NET=%s" % ("true" if spec["firmae_net"] else "false"),
+    ]
+    for (hostIp, guestIp, vlan) in spec["nets"]:
+        lines.append("NET=%s %s %s" % (hostIp, guestIp, "-" if vlan is None else "%d" % vlan))
+    for (kind, arg) in spec["nics"]:
+        if kind == "user":
+            lines.append("NIC=user fwd" if arg else "NIC=user")
+        else:
+            lines.append("NIC=%s %d" % (kind, arg))
+    for (proto, guestPort, hostPort) in spec["hostfwd"]:
+        lines.append("HOSTFWD=%s %d %d" % (proto, guestPort, hostPort))
+    return EMULATION_HEADER + "".join(l + "\n" for l in lines)
+
+
+_NUM = r"(0|[1-9][0-9]{0,9})"
+_EMULATION_LINE_RE = re.compile(r"([A-Z_]{1,32})=(.*)\Z")
+_EMULATION_VALUE_RE = {
+    "FORMAT": re.compile(r"1\Z"),
+    "IID": re.compile(_NUM + r"\Z"),
+    "ARCH": re.compile(r"(arm|mips)\Z"),
+    "ENDIAN": re.compile(r"(el|eb)\Z"),
+    "NETWORK_TYPE": re.compile(r"(%s)\Z" % "|".join(NETWORK_TYPES)),
+    "NET_BRIDGE": re.compile(r"(|[A-Za-z0-9][A-Za-z0-9_.:-]{0,14})\Z"),
+    "NET_INTERFACE": re.compile(r"(|[A-Za-z0-9][A-Za-z0-9_.:-]{0,14})\Z"),
+    "QEMU_INIT": QEMU_INIT_RE,
+    "GEN_FIRMAE_NET": re.compile(r"(true|false)\Z"),
+    "NET": re.compile(r"([0-9.]{7,15}) ([0-9.]{7,15}) (-|" + _NUM + r")\Z"),
+    "NIC": re.compile(r"(tap " + _NUM + r"|socket " + _NUM + r"|user|user fwd)\Z"),
+    "HOSTFWD": re.compile(r"(tcp|udp) " + _NUM + " " + _NUM + r"\Z"),
+}
+_EMULATION_SINGLE = {
+    "FORMAT": None, "IID": "iid", "ARCH": "arch", "ENDIAN": "endian",
+    "NETWORK_TYPE": "network_type", "NET_BRIDGE": "net_bridge",
+    "NET_INTERFACE": "net_interface", "QEMU_INIT": "qemu_init", "GEN_FIRMAE_NET": "firmae_net",
+}
+
+
+def parseEmulation(text, complete=True, iid=None):
+    """Spec of an emulation.conf text, with the grammar emulate.sh applies.
+    complete=False accepts a file with records missing (only the lines that
+    are there are checked); complete=True also runs checkEmulation(). iid:
+    the image the file must be for (emulate.sh: the IID run.sh passes)."""
+    def bad(why):
+        raise UnsafeValue("%s: %s" % (EMULATION_FILE, why))
+
+    if not isinstance(text, str):
+        bad("not text")
+    lines = text.split("\n")
+    if lines[-1] != "":
+        bad("does not end with a newline")
+    lines = lines[:-1]
+    if len(lines) > EMULATION_MAX_LINES:
+        bad("too many lines")
+    spec = {"nets": [], "nics": [], "hostfwd": []}
+    seen = set()
+    for n, line in enumerate(lines, 1):
+        if len(line) >= EMULATION_MAX_LINE:
+            bad("line %d is too long" % n)
+        if line.startswith("#"):
+            continue
+        m = _EMULATION_LINE_RE.match(line)
+        if not m or m.group(1) not in _EMULATION_VALUE_RE:
+            bad("line %d is not a known KEY=value record" % n)
+        key, value = m.groups()
+        v = _EMULATION_VALUE_RE[key].match(value)
+        if not v:
+            bad("line %d: invalid %s" % (n, key))
+        if key in _EMULATION_SINGLE:
+            if key in seen:
+                bad("%s given twice" % key)
+            seen.add(key)
+            if key == "IID":
+                spec["iid"] = int(value)
+                if iid is not None and spec["iid"] != iid:
+                    bad("it is for image %s, not %s" % (value, iid))
+            elif key == "GEN_FIRMAE_NET":
+                spec["firmae_net"] = value == "true"
+            elif key != "FORMAT":
+                spec[_EMULATION_SINGLE[key]] = value
+        elif key == "NET":
+            hostIp, guestIp, vlan = value.split(" ")
+            spec["nets"].append((hostIp, guestIp, None if vlan == "-" else int(vlan)))
+        elif key == "NIC":
+            kind, _, arg = value.partition(" ")
+            if kind == "user" and arg in ("", "fwd"):
+                spec["nics"].append(("user", arg == "fwd"))
+            elif kind in ("tap", "socket") and arg.isdigit():
+                spec["nics"].append((kind, int(arg)))
+            else:
+                bad("line %d: invalid NIC" % n)
+        else:
+            proto, guestPort, hostPort = value.split(" ")
+            spec["hostfwd"].append((proto, int(guestPort), int(hostPort)))
+    checkHostfwd(spec["hostfwd"])
+    if complete:
+        missing = set(_EMULATION_SINGLE) - seen
+        if missing:
+            bad("missing %s" % ", ".join(sorted(missing)))
+        checkEmulation(spec)
+    return spec
+
+
+def hostfwdRulesIn(text):
+    """[(proto, guest port, host port)] of the HOSTFWD records of an
+    emulation.conf text -- what emulate.sh will pass to QEMU. process()
+    records exactly these in scratch/<IID>/hostfwd, read back from the text
+    it writes, so the file can never announce a rule that QEMU does not get.
+    Validated like qemuCmd's input."""
+    return parseEmulation(text, complete=False)["hostfwd"]
+
+
+def qemuCmd(
+    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
+    hostfwd=None,
+):
+    """scratch/<IID>/emulation.conf for this image (see qemuCmdAndHostfwd).
+    The name is historical: this used to return the generated run.sh."""
+    return qemuCmdAndHostfwd(iid, network, ports, network_type, arch, endianness,
+                             qemuInitValue, isUserNetwork, hostfwd)[0]
+
+
+def qemuCmdAndHostfwd(
+    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
+    hostfwd=None,
+):
+    """(emulation.conf text, hostfwd rules emulate.sh really passes to QEMU)."""
+    spec = emulationSpec(iid, network, ports, network_type, arch, endianness,
+                         qemuInitValue, isUserNetwork, hostfwd)
+    return emulationText(spec), list(spec["hostfwd"])
+
+
+def emulationQemuNetwork(text):
+    """QEMU network arguments that emulate.sh builds from an emulation.conf
+    text (for tests and log messages)."""
+    spec = parseEmulation(text)
+    return renderNics(spec["arch"], spec["nics"], spec["hostfwd"])
 
 
 def getNetworkList(data, ifacesWithIps, macChanges):
@@ -1377,6 +1479,9 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
         # return the fixed network interface
         print("[*] networkInfo: %r" % networkList)
         filterNetworkList, network_type = checkNetwork(networkList)
+        # no guest address the host must not probe, and none equal to a
+        # host-side TAP address of this layout (logged, not fatal)
+        filterNetworkList = usableNetworkList(filterNetworkList)
 
         print("[*] filter network info: %r" % filterNetworkList)
 
@@ -1418,7 +1523,8 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
                 hostfwd = chooseHostPorts(iid, ports)
                 print("[*] hostfwd (proto, guest port, host port): %r" % hostfwd)
 
-            qemuCommandLine = qemuCmd(
+            # the per-image data that scripts/emulate.sh reads
+            emulation = qemuCmd(
                 iid,
                 filterNetworkList,
                 ports,
@@ -1429,22 +1535,17 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
                 isUserNetwork,
                 hostfwd,
             )
-            # only the rules that are really in run.sh's QEMU arguments, read
-            # back from the script itself (none: no file)
-            hostfwd = hostfwdRulesIn(qemuCommandLine)
+            # only the rules that emulate.sh really passes to QEMU: the HOSTFWD
+            # records of the very text written below (none: no file)
+            hostfwd = hostfwdRulesIn(emulation)
+            writeStateFile(SCRATCHDIR + "/" + str(iid) + "/" + EMULATION_FILE, emulation,
+                           mode=0o644)
             if hostfwd:
                 writeStateFile(hostfwdPath, hostfwdText(hostfwd))
 
-            with open(outfile, "w") as out:
-                out.write(qemuCommandLine)
-            os.chmod(
-                outfile,
-                stat.S_IRWXU
-                | stat.S_IRGRP
-                | stat.S_IXGRP
-                | stat.S_IROTH
-                | stat.S_IXOTH,
-            )
+            # run.sh: the fixed wrapper (rwxr-xr-x as before; not written
+            # through a symlink any more)
+            writeStateFile(outfile, runShWrapper(iid), mode=0o755)
 
             # not os.system(): that ignores SIGINT while it waits
             subprocess.call(["./scripts/check_emulation.sh", str(iid), arch + endianness])

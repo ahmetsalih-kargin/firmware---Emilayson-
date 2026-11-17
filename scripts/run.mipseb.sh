@@ -9,5 +9,7 @@
 # The installation is found from this file, never from the working directory.
 # python3 replaces this shell (exec) and then QEMU replaces python3; -I only
 # affects the interpreter, QEMU gets the caller's environment unchanged.
-FIRMAE_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# CDPATH= and >/dev/null: with CDPATH exported, cd would print the directory
+# it found and that output would become part of FIRMAE_HOME.
+FIRMAE_HOME="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
 exec python3 -I "${FIRMAE_HOME}/firmae/qemu.py" initial mipseb "$@"

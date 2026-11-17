@@ -22,6 +22,7 @@ fileList = [
     "armeb",
     "qemu.final.serial.log",
     "run.sh",
+    "emulation.conf",
     "serial.log",
     ".qemu.final.serial.log.swp",
 ]

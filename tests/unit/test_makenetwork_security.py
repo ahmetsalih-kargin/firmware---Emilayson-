@@ -1,11 +1,12 @@
 """Regression tests for the hardening of scripts/makeNetwork.py.
 
 The serial log and the image file system are written by the (untrusted)
-emulated firmware, and the generated run.sh runs as root on the host:
-- log values must never become shell code in run.sh (command injection),
+emulated firmware, and the final emulation (run.sh -> scripts/emulate.sh,
+reading scratch/<IID>/emulation.conf) runs as root on the host:
+- log values must never become shell code (command injection),
 - malformed log lines must not crash makeNetwork,
 - symlinks/special files the guest plants in the image must not redirect a
-  host write (Python side and run.sh side),
+  host write (Python side and emulate.sh side),
 - reads are bounded and lossless.
 """
 
@@ -126,7 +127,8 @@ def test_valid_inputs_pass(firmae_env):
     mn.checkQemuCmdInputs(1, [("10.0.2.15", "eth0", 4094, "00:11:22:33:44:55", "br-lan")],
                           [("tcp", "0.0.0.0", 8080)], "bridgereload", "init=/firmadyne/preInit.sh")
     out = mn.qemuCmd(0, [], [], "default", "mips", "el", INIT, False)
-    assert 'echo "" > ${WORK_DIR}/image/firmadyne/net_bridge' in out
+    assert "\nNET_BRIDGE=\n" in out and "\nNET=" not in out
+    assert mn.parseEmulation(out)["net_bridge"] == ""
 
 
 @pytest.mark.parametrize("kw", [
@@ -145,6 +147,7 @@ def test_valid_inputs_pass(firmae_env):
     dict(network_type='normal"; id; "'),
     dict(qemuInitValue='rdinit=/x" -device foo "'),
     dict(qemuInitValue="init=/$(id)"),
+    dict(qemuInitValue="init=/x\nNIC=user fwd"),
     dict(iid="1;id"),
 ])
 def test_unsafe_values_are_refused(kw, firmae_env):
@@ -156,51 +159,20 @@ def test_unsafe_values_are_refused(kw, firmae_env):
 
 
 # --------------------------------------------------------------------------
-# run.sh executed with stubbed commands (like tests/unit/test_generated_run_sh.py)
+# run.sh executed with stubbed commands (tests/unit/emulation_world.py)
 # --------------------------------------------------------------------------
-
-FAKE_QEMU = """#!/bin/bash
-echo "qemu start $$" >> "$LOG"
-exit 0
-"""
-
 
 @pytest.fixture
 def run_world(repo_root, tmp_path, firmae_env, iptables_stubs):
-    root = tmp_path / "FirmAE"
-    image = root / "scratch" / "1" / "image"
-    (image / "firmadyne").mkdir(parents=True)
-    log_file = tmp_path / "log"
-    text = (repo_root / "firmae.config").read_text()
-    text += ('\nadd_partition () { echo /dev/fakeloop0p1; }\n'
-             'del_partition () { echo "del_partition $1" >> "$LOG"; }\n')
-    (root / "firmae.config").write_text(text)
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
+    from emulation_world import World
+    w = World(tmp_path / "w", repo_root, iptables_stubs)
 
-    def stub(name, body):
-        (bindir / name).write_text("#!/bin/bash\n" + body + "\n")
-        (bindir / name).chmod(0o755)
-    rec = 'echo "$(basename $0) $*" >> "$LOG"'
-    stub("sudo", 'exec "$@"')
-    for name in ("mount", "umount", "ip", "tunctl"):
-        stub(name, rec)
-    stub("mountpoint", "exit 1")
-    stub("qemu-system-mipsel", FAKE_QEMU)
-    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]),
-               USER=os.environ.get("USER", "root"),
-               **iptables_stubs(bindir, log_file, tmp_path / "rules"))
-    env.pop("FIRMAE_DOCKER", None)
-
-    def run(script):
-        run_sh = root / "scratch" / "1" / "run.sh"
-        run_sh.write_text(script)
-        run_sh.chmod(0o755)
-        p = subprocess.run([str(run_sh)], cwd=root, env=env, capture_output=True,
-                           text=True, timeout=60)
-        calls = log_file.read_text().splitlines() if log_file.exists() else []
-        return p, calls
-    return run, image
+    def run(emulation):
+        w.install(emulation)
+        p = subprocess.run([str(w.run_sh)], cwd=str(w.root), env=dict(w.env, QEMU_EXIT_AFTER="0"),
+                           capture_output=True, text=True, timeout=60)
+        return p, w.calls()
+    return run, w.image
 
 
 def malicious_log(marker):
@@ -230,9 +202,9 @@ def test_injection_from_the_serial_log_does_not_execute(run_world, tmp_path):
     netlist = mn.getNetworkList(data, ifaces, mn.findMacChanges(data, "el"))
     filtered, network_type = mn.checkNetwork(netlist)
     assert filtered == [("192.168.0.1", "eth0", None, None, "br0")]
-    script = mn.qemuCmd(1, filtered, ports, network_type, "mips", "el", INIT, False)
+    emulation = mn.qemuCmd(1, filtered, ports, network_type, "mips", "el", INIT, False)
 
-    p, calls = run(script)
+    p, calls = run(emulation)
     assert p.returncode == 0, p.stdout + p.stderr
     assert any(c.startswith("qemu start") for c in calls)
     assert not marker.exists()
@@ -242,15 +214,22 @@ def test_injection_from_the_serial_log_does_not_execute(run_world, tmp_path):
 
 
 @linux
-def test_the_harness_would_detect_an_injection(run_world, tmp_path, monkeypatch):
-    """Negative control: with the qemuCmd() check disabled the same payload runs."""
+def test_with_the_python_checks_disabled_emulate_sh_still_refuses(run_world, tmp_path, monkeypatch):
+    """Negative control of the old template (where this payload ran): with
+    both write-time checks switched off the payload reaches emulation.conf,
+    and the read-side whitelist of emulate.sh stops before any command."""
     run, _ = run_world
     marker = tmp_path / "PWNED"
     monkeypatch.setattr(mn, "checkQemuCmdInputs", lambda *a: None)
-    script = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0$(touch${IFS}%s)" % marker)],
-                        [], "normal", "mips", "el", INIT, False)
-    run(script)
-    assert marker.exists()
+    monkeypatch.setattr(mn, "checkEmulation", lambda *a: None)
+    emulation = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0$(touch${IFS}%s)" % marker)],
+                           [], "normal", "mips", "el", INIT, False)
+    assert "$(touch" in emulation
+    p, calls = run(emulation)
+    assert p.returncode == 1
+    assert "invalid NET_BRIDGE" in p.stderr
+    assert not marker.exists()
+    assert calls == []                       # not even the image was attached
 
 
 @linux
@@ -263,7 +242,7 @@ def test_run_sh_refuses_a_symlinked_firmadyne_directory(run_world, tmp_path):
     (image / "firmadyne").symlink_to(host)
     p, calls = run(mn.qemuCmd(1, GOOD_NET, [], "normal", "mips", "el", INIT, False))
     assert p.returncode != 0
-    assert "is not a plain directory" in p.stderr
+    assert "is not a plain directory" in p.stdout + p.stderr
     assert (host / "network_type").read_text() == "host file\n"
     assert sorted(os.listdir(host)) == ["network_type"]
     assert "del_partition /dev/fakeloop0" in calls          # cleanup still ran

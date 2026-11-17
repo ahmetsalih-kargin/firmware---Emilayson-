@@ -1,0 +1,17 @@
+# FirmAE per-image emulation values, written by scripts/makeNetwork.py.
+# Data only: scripts/emulate.sh (started by run.sh) checks every line and
+# never sources this file.
+FORMAT=1
+IID=1
+ARCH=mips
+ENDIAN=eb
+NETWORK_TYPE=normal
+NET_BRIDGE=brtrunk
+NET_INTERFACE=eth0
+QEMU_INIT=rdinit=/firmadyne/preInit.sh
+GEN_FIRMAE_NET=true
+NET=192.168.0.99 192.168.0.100 -
+NIC=tap 0
+NIC=socket 20005
+NIC=socket 20006
+NIC=socket 20007

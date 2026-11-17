@@ -219,27 +219,39 @@ def test_qemucmd_refuses_bad_hostfwd_rules(hf, firmae_env):
 
 
 # --------------------------------------------------------------------------
-# generated run.sh
+# generated emulation data (scratch/<IID>/emulation.conf, read by
+# scripts/emulate.sh; run.sh is a fixed wrapper since Phase 4.4)
 # --------------------------------------------------------------------------
 
-def hostfwd_rules(script):
-    return re.findall(r"hostfwd=(tcp|udp):([0-9.]*):([0-9]+)-:([0-9]+)", script)
+def hostfwd_rules(args):
+    return re.findall(r"hostfwd=(tcp|udp):([0-9.]*):([0-9]+)-:([0-9]+)", args)
+
+
+def qemu_net(emulation):
+    """The QEMU network arguments emulate.sh builds from an emulation.conf text."""
+    return mn.emulationQemuNetwork(emulation)
+
+
+def prechecked(emulation):
+    """Host ports emulate.sh pre-checks before QEMU starts: the TCP ones."""
+    return [h for (p, _g, h) in mn.hostfwdRulesIn(emulation) if p == "tcp"]
 
 
 def test_user_network_run_sh_forwards_loopback_host_ports(firmae_env):
     hf = [("tcp", 80, 10120), ("tcp", 443, 10121), ("tcp", 8080, 10122), ("udp", 161, 10123)]
-    out = mn.qemuCmd(3, [DHCP_NET], [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 161)],
-                     "normal", "mips", "el", INIT, True, hf)
+    data = mn.qemuCmd(3, [DHCP_NET], [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 161)],
+                      "normal", "mips", "el", INIT, True, hf)
+    out = qemu_net(data)
     assert "-netdev user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:10120-:80," \
            "hostfwd=tcp:127.0.0.1:10121-:443,hostfwd=tcp:127.0.0.1:10122-:8080," \
            "hostfwd=udp:127.0.0.1:10123-:161 " in out
     assert hostfwd_rules(out) == [(p, "127.0.0.1", str(h), str(g)) for (p, g, h) in hf]
-    # the run.sh pre-check covers the TCP host ports
-    assert "for HOSTFWD_PORT in 10120 10121 10122; do" in out
+    # the emulate.sh pre-check covers the TCP host ports
+    assert prechecked(data) == [10120, 10121, 10122]
 
 
 def test_user_network_chooses_ports_when_none_are_given(firmae_env):
-    out = mn.qemuCmd(1, [DHCP_NET], [], "normal", "mips", "el", INIT, True)
+    out = qemu_net(mn.qemuCmd(1, [DHCP_NET], [], "normal", "mips", "el", INIT, True))
     rules = hostfwd_rules(out)
     assert [(p, g) for (p, _, _, g) in rules] == [("tcp", "80"), ("tcp", "443")]
     assert all(a == "127.0.0.1" and mn.HOSTFWD_PORT_MIN <= int(h) <= mn.HOSTFWD_PORT_MAX
@@ -274,7 +286,8 @@ LAYOUTS = {
     "dhcp-second": [("192.168.0.1", "eth0", None, None, "br0"), ("10.0.2.15", "eth1", None, None, "br1")],
     "dhcp-eth5": [("10.0.2.15", "eth5", None, None, "br0")],
     "dhcp-then-guessed": [("10.0.2.15", "eth0", None, None, "br0"), ("192.168.0.1", "eth7", None, None, "br1")],
-    "two-dhcp": [("10.0.2.15", "eth0", None, None, "br0"), ("10.0.2.16", "eth0", None, None, "br1")],
+    # (.17, not .16: guest .16 would be the host TAP address of guest .15 -- audit B1)
+    "two-dhcp": [("10.0.2.15", "eth0", None, None, "br0"), ("10.0.2.17", "eth0", None, None, "br1")],
     "one-dhcp": [DHCP_NET],
 }
 
@@ -285,15 +298,15 @@ def test_recorded_rules_are_exactly_the_rules_in_the_qemu_arguments(arch, layout
     """Audit finding: for some layouts the rules vanished from the QEMU
     arguments while scratch/<IID>/hostfwd still announced them."""
     hf = [("tcp", 80, 10280), ("tcp", 443, 10281), ("udp", 161, 10282)]
-    script, placed = mn.qemuCmdAndHostfwd(7, LAYOUTS[layout], [("udp", "0.0.0.0", 161)], "normal",
-                                          arch, "el", INIT, True, hf)
-    netdevs = user_netdevs(script)
+    data, placed = mn.qemuCmdAndHostfwd(7, LAYOUTS[layout], [("udp", "0.0.0.0", 161)], "normal",
+                                        arch, "el", INIT, True, hf)
+    netdevs = user_netdevs(qemu_net(data))
     carrying = [n for n, rules in netdevs.items() if rules]
     assert len(carrying) == 1                       # exactly one NIC, never zero
     assert netdevs[carrying[0]] == [(p, h, g) for (p, g, h) in placed]
     assert placed == hf
-    assert mn.hostfwdRulesIn(script) == placed      # what process() records
-    assert "for HOSTFWD_PORT in 10280 10281; do" in script
+    assert mn.hostfwdRulesIn(data) == placed        # what process() records
+    assert prechecked(data) == [10280, 10281]
 
 
 @pytest.mark.parametrize("arch", ["mips", "arm"])
@@ -308,7 +321,9 @@ def test_no_placed_nic_means_no_rules_and_no_file_content(firmae_env):
     hf = [("tcp", 80, 10000), ("tcp", 443, 10001)]
     args, placed = mn.qemuNetworkConfigAndHostfwd("mips", [], True, [], 0, hf)
     assert placed == [] and "hostfwd" not in args
-    assert mn.hostfwdCheck(placed) == "" and mn.hostfwdText(placed) == ""
+    assert mn.hostfwdText(placed) == ""
+    data = mn.qemuCmd(1, [], [], "None", "mips", "el", INIT, True, hf)
+    assert "HOSTFWD=" not in data and prechecked(data) == []     # no rule, no pre-check
 
 
 def test_tap_mode_reports_no_rules(firmae_env):
@@ -319,7 +334,7 @@ def test_tap_mode_reports_no_rules(firmae_env):
 
 
 def test_process_writes_no_file_when_run_sh_has_no_rules(tmp_path, monkeypatch, firmae_env):
-    """The file is derived from the generated run.sh: no rule there, no file."""
+    """The file is derived from the generated emulation data: no rule there, no file."""
     monkeypatch.setattr(mn, "qemuCmd", lambda *a, **k: "#!/bin/true\n")
     work = generate(tmp_path, monkeypatch, log(*HOSTILE_LOG))
     assert (work / "isDhcp").read_text() == "true"
@@ -333,7 +348,7 @@ def test_process_records_what_qemu_gets_for_the_audit_layout(tmp_path, monkeypat
     work = generate(tmp_path, monkeypatch, log(
         "__inet_insert_ifa[PID: 1 (ip)]: device:eth7 ifa:0x0100a8c0",
         "__inet_insert_ifa[PID: 1 (udhcpc)]: device:eth0 ifa:0x0f02000a", bind41(8080)))
-    netdevs = user_netdevs((work / "run.sh").read_text())
+    netdevs = user_netdevs(qemu_net((work / mn.EMULATION_FILE).read_text()))
     rules = [l.split() for l in (work / "hostfwd").read_text().splitlines()]
     carried = [r for rs in netdevs.values() for r in rs]
     assert carried == [(p, int(h), int(g)) for (p, g, h) in rules]
@@ -353,7 +368,7 @@ def test_tap_mode_has_no_hostfwd_and_no_precheck(firmae_env):
     out = mn.qemuCmd(1, [TAP_NET], [("tcp", "0.0.0.0", 8080)], "normal", "mips", "el", INIT, False,
                      [("tcp", 80, 10000)])
     assert "hostfwd" not in out.lower()
-    assert "isolate_guest_network ${IID}\n\n# QEMU runs" in out
+    assert mn.parseEmulation(out)["hostfwd"] == [] and prechecked(out) == []
 
 
 HOSTILE_LOG = [
@@ -397,7 +412,8 @@ def generate(tmp_path, monkeypatch, serial, iid=4, web=False):
 def test_process_writes_run_sh_and_the_mapping_file(tmp_path, monkeypatch, firmae_env):
     work = generate(tmp_path, monkeypatch, log(*HOSTILE_LOG))
     assert (work / "isDhcp").read_text() == "true"
-    script = (work / "run.sh").read_text()
+    data = (work / mn.EMULATION_FILE).read_text()
+    script = qemu_net(data)
     mapping = (work / "hostfwd").read_text()
     lines = mapping.splitlines()
     assert mapping.endswith("\n")
@@ -408,11 +424,13 @@ def test_process_writes_run_sh_and_the_mapping_file(tmp_path, monkeypatch, firma
     assert [(p, int(g)) for (p, g, _) in rules] == [("tcp", 80), ("tcp", 443), ("tcp", 8080),
                                                     ("tcp", 8082)]
     assert all(mn.HOSTFWD_PORT_MIN <= int(h) <= mn.HOSTFWD_PORT_MAX for (_, _, h) in rules)
-    # run.sh forwards exactly what the file records
+    # QEMU gets exactly what the file records
     assert hostfwd_rules(script) == [(p, "127.0.0.1", h, g) for (p, g, h) in rules]
     assert not re.search(r"hostfwd=tcp:127\.0\.0\.1:(80|443)-", script)
-    # nothing of the hostile lines got into the script
-    assert "PWNED" not in script and "999" not in script and "8081" not in script
+    # nothing of the hostile lines got into the data or run.sh
+    for text in (data, (work / "run.sh").read_text()):
+        assert "PWNED" not in text and "999" not in text and "8081" not in text
+    assert (work / "run.sh").read_text() == mn.runShWrapper(4)
 
 
 @linux
@@ -431,6 +449,7 @@ def test_process_in_tap_mode_removes_a_stale_mapping(tmp_path, monkeypatch, firm
     assert (work / "isDhcp").read_text() == "false"
     assert not (work / "hostfwd").exists()
     assert "hostfwd" not in (work / "run.sh").read_text()
+    assert "HOSTFWD" not in (work / mn.EMULATION_FILE).read_text()
 
 
 @linux
@@ -458,20 +477,27 @@ def test_mapping_file_format():
 
 
 @linux
-def test_run_sh_precheck_stops_on_a_taken_port(tmp_path):
+def test_run_sh_precheck_stops_on_a_taken_port(tmp_path, repo_root, iptables_stubs, firmae_env):
+    """The pre-check (now in scripts/emulate.sh) refuses to start QEMU on a
+    taken TCP host port; a UDP rule is not pre-checked."""
+    from emulation_world import World
+    taken, other = free_ports(2)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
+    s.bind(("127.0.0.1", taken))
     s.listen(1)
-    taken = s.getsockname()[1]
     try:
-        for ports, rc in (([("tcp", 80, taken)], 1), ([("udp", 161, taken)], 0)):
-            script = tmp_path / "pre.sh"
-            script.write_text("set -e\n" + mn.hostfwdCheck(ports) + "\necho reached\n")
-            res = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
-            assert res.returncode == rc, res.stderr
+        for n, (rules, rc) in enumerate((([("tcp", 80, other), ("tcp", 443, taken)], 1),
+                                         ([("tcp", 80, other), ("udp", 161, taken)], 0))):
+            w = World(tmp_path / str(n), repo_root, iptables_stubs)
+            w.install(mn.qemuCmd(1, [DHCP_NET], [("udp", "0.0.0.0", 161)], "normal", "mips", "el",
+                                 INIT, True, rules))
+            res = subprocess.run([str(w.run_sh)], cwd=str(w.root), env=dict(w.env, QEMU_EXIT_AFTER="0"),
+                                 capture_output=True, text=True, timeout=60)
+            assert res.returncode == rc, res.stdout + res.stderr
+            started = any(c.startswith("qemu start") for c in w.calls())
+            assert started == (rc == 0)
             if rc:
                 assert "127.0.0.1:%d (hostfwd) is in use" % taken in res.stderr
-                assert "reached" not in res.stdout
     finally:
         s.close()
 
@@ -550,13 +576,34 @@ def procs():
         p.wait()
 
 
+class FakeClock:
+    """The check without waiting (firmae.check.Clock): whole seconds advance
+    10 s per reading (as the old `date` stub did), sleep only yields briefly."""
+
+    def __init__(self):
+        self.t = 0
+
+    def now(self):
+        n = self.t
+        self.t += 10
+        return n
+
+    def precise(self):
+        return 0.0
+
+    def sleep(self, seconds):
+        time.sleep(min(seconds, 0.02))
+
+
 @pytest.fixture
-def dhcp_check(repo_root, tmp_path, procs):
+def dhcp_check(repo_root, tmp_path, procs, monkeypatch, capsys):
+    """firmae.check (scripts/check_emulation.sh since REFACTORING_PLAN 4.5) run
+    in this process with a fake clock; run.sh, curl, ping and ss are real
+    processes (stubs)."""
+    from firmae import check
     root = tmp_path / "FirmAE"
     (root / "scripts").mkdir(parents=True)
     shutil.copy(repo_root / "firmae.config", root)
-    for name in ("check_emulation.sh", "hostfwd_check.sh"):
-        shutil.copy(repo_root / "scripts" / name, root / "scripts")
     work = root / "scratch" / "5"
     work.mkdir(parents=True)
     (work / "image.raw").write_text("")
@@ -567,15 +614,10 @@ def dhcp_check(repo_root, tmp_path, procs):
     # the last argument is the URL
     stub(bindir, "curl", 'echo "curl ${@: -1}" >> %s; [ -n "${CURL_OK:-}" ] && [ "${@: -1}" = "$CURL_OK" ]' % netlog)
     stub(bindir, "ping", 'echo "ping $*" >> %s; exit 0' % netlog)
-    stub(bindir, "sleep", "exit 0")
-    clock = tmp_path / "clock"
-    clock.write_text("0")
-    stub(bindir, "date", 'if [ "$1" = "+%%s" ]; then n=$(cat %s); echo $n; echo $((n+10)) > %s; '
-                         'else echo 0.0; fi' % (clock, clock))
     fake = tmp_path / "fakeqemu.py"
     fake.write_text(FAKE_QEMU)
-    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]))
-    env.pop("FIRMAE_DOCKER", None)
+    monkeypatch.setenv("PATH", "%s:%s" % (bindir, os.environ["PATH"]))
+    monkeypatch.delenv("FIRMAE_DOCKER", raising=False)
 
     def qemu(ports, iid="5"):
         """this image's (fake) QEMU, listening on `ports`"""
@@ -609,9 +651,14 @@ def dhcp_check(repo_root, tmp_path, procs):
                 (work / name).unlink()
         if netlog.exists():
             netlog.unlink()
-        e = dict(env, CURL_OK=curl_ok) if curl_ok else env
-        res = subprocess.run(["bash", "./scripts/check_emulation.sh", "5", "mipsel"], cwd=root, env=e,
-                             capture_output=True, text=True, timeout=120)
+        if curl_ok:
+            monkeypatch.setenv("CURL_OK", curl_ok)
+        else:
+            monkeypatch.delenv("CURL_OK", raising=False)
+        capsys.readouterr()
+        rc = check.main(["./scripts/check_emulation.sh", "5", "mipsel"], root=str(root), clock=FakeClock())
+        out, err = capsys.readouterr()
+        res = subprocess.CompletedProcess([], rc, out, err)
         assert res.returncode == 0, res.stdout + res.stderr
         assert "Check inferred emulation end" in res.stdout
         calls = netlog.read_text().splitlines() if netlog.exists() else []
@@ -813,3 +860,8 @@ def test_shell_and_python_hostfwd_ranges_agree(repo_root):
     check = (repo_root / "scripts" / "check_emulation.sh").read_text()
     assert 'echo true > ${WORK_DIR}/ping\nelse' not in check     # no unconditional ping=true
     assert "read_hostfwd ()" not in check and "check_hostfwd ()" not in check   # one copy only
+    # the Python copy used by firmae/check.py (REFACTORING_PLAN 4.5)
+    from firmae import hostfwd
+    assert (hostfwd.HOSTFWD_PORT_MIN, hostfwd.HOSTFWD_PORT_MAX) == (mn.HOSTFWD_PORT_MIN, mn.HOSTFWD_PORT_MAX)
+    assert "HOSTFWD_MAX_BYTES=%d\n" % hostfwd.HOSTFWD_MAX_BYTES in text
+    assert "HOSTFWD_MAX_LINES=%d\n" % hostfwd.HOSTFWD_MAX_LINES in text

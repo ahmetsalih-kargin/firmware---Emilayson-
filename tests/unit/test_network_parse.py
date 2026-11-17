@@ -222,3 +222,123 @@ def test_get_network_list_without_firmae_net_prunes_duplicate_ips(firmae_env):
                "br_add_if[PID: 1 (brctl)]: br:br0 dev:eth1")
     netlist = mn.getNetworkList(data, [("br0", "192.168.0.1")], [])
     assert netlist == [("192.168.0.1", "eth0", None, None, "br0")]
+
+
+# --------------------------------------------------------------------------
+# Acceptable guest addresses (audit B1): the guest reports its addresses in
+# the serial log; the host probes them as root and routes them to a TAP
+# device. One definition at three layers: makeNetwork.isGuestIpv4,
+# firmae.check.usable_guest_ip, emu_guest_ipv4 in scripts/emulate.sh.
+# --------------------------------------------------------------------------
+
+def el(ip):
+    """__inet_insert_ifa hex of `ip` as a little-endian guest logs it"""
+    import socket
+    import struct
+    return "0x%08x" % struct.unpack("<I", socket.inet_aton(ip))[0]
+
+
+UNUSABLE = [
+    ("127.0.0.2", "loopback"), ("127.255.255.254", "loopback"),
+    ("0.1.2.3", "0.0.0.0/8"), ("0.255.255.255", "0.0.0.0/8"),
+    ("224.0.0.1", "multicast"), ("239.255.255.250", "multicast"),
+    ("169.254.0.1", "link-local"), ("169.254.255.254", "link-local"),
+    ("240.0.0.1", "reserved"), ("255.255.255.254", "reserved"),
+    ("255.255.255.255", "limited broadcast"),
+]
+USABLE = ["192.168.0.1", "10.0.2.15", "172.16.0.1", "8.8.8.8", "1.0.0.0", "126.255.255.255",
+          "128.0.0.0", "169.253.255.255", "169.255.0.1", "223.255.255.255", "100.64.0.1",
+          "192.0.2.1", "10.0.0.255"]
+
+
+@pytest.mark.parametrize("ip,reason", UNUSABLE)
+def test_unusable_guest_addresses_are_dropped_by_the_parser(ip, reason, capsys):
+    """Was: only 127.0.0.1 and 0.0.0.0 were dropped; ifa:0x0200007f (127.0.0.2)
+    became ip.0 and was curled / pinged on the host."""
+    data = log("__inet_insert_ifa[PID: 1 (ip)]: device:lo ifa:0x0100007f",
+               "__inet_insert_ifa[PID: 1 (ip)]: device:eth1 ifa:%s" % el(ip),
+               "__inet_insert_ifa[PID: 1 (ip)]: device:br0 ifa:0x0100a8c0")
+    capsys.readouterr()
+    assert mn.findNonLoInterfaces(data, "el") == [("br0", "192.168.0.1")]
+    out = capsys.readouterr().out
+    assert "skipped interface address %s of eth1" % ip in out and reason in out
+    assert "127.0.0.1" not in out              # lo: dropped silently, as before
+    assert not mn.isGuestIpv4(ip) and reason in mn.unusableGuestIpReason(ip)
+
+
+def test_usable_guest_addresses_are_kept_by_the_parser(capsys):
+    data = log(*["__inet_insert_ifa[PID: 1 (ip)]: device:eth%d ifa:%s" % (i % 10, el(ip))
+                 for i, ip in enumerate(USABLE)])
+    assert mn.findNonLoInterfaces(data, "el") == [("eth%d" % (i % 10), ip) for i, ip in enumerate(USABLE)]
+    assert "Warning" not in capsys.readouterr().out
+
+
+def test_unusable_address_warnings_are_bounded(capsys):
+    data = log(*["__inet_insert_ifa[PID: 1 (ip)]: device:eth0 ifa:0x%02x00007f" % (i + 2) for i in range(50)])
+    assert mn.findNonLoInterfaces(data, "el") == []
+    out = capsys.readouterr().out
+    assert out.count("skipped interface address") == mn.MAX_WARNINGS
+    assert "skipped %d more unusable interface addresses" % (50 - mn.MAX_WARNINGS) in out
+
+
+@pytest.mark.parametrize("layout,kept", [
+    # guest .1 -> host .2 and guest .2 -> host .1: the second one would be probed
+    # on the host's own TAP address; the first entry of a colliding pair is kept
+    (["192.168.0.1", "192.168.0.2"], ["192.168.0.1"]),
+    (["192.168.0.2", "192.168.0.1"], ["192.168.0.2"]),
+    (["192.168.0.1", "10.0.0.1", "192.168.0.2", "10.0.0.2"], ["192.168.0.1", "10.0.0.1"]),
+    # .0 -> host .1; guest .1 would be that host address
+    (["192.168.0.0", "192.168.0.1"], ["192.168.0.0"]),
+    # the same guest address on two devices (FIRMAE_NET) is no collision
+    (["192.168.0.1", "192.168.0.1"], ["192.168.0.1", "192.168.0.1"]),
+    (["192.168.0.1", "192.168.1.1", "192.168.0.3"], ["192.168.0.1", "192.168.1.1", "192.168.0.3"]),
+])
+def test_guest_address_equal_to_a_host_address_is_dropped(layout, kept, capsys):
+    nets = [N(ip, "eth%d" % i) for i, ip in enumerate(layout)]
+    res = mn.dropHostIpCollisions(nets)
+    assert [n[0] for n in res] == kept
+    hosts = {mn.convertToHostIp(n[0]) for n in res}
+    assert not hosts & {n[0] for n in res}
+    out = capsys.readouterr().out
+    assert out.count("collides with a host-side TAP address") == len(layout) - len(kept)
+
+
+def test_usable_network_list_drops_classes_and_collisions(capsys):
+    nets = [N("127.0.0.2", "eth0"), N("192.168.0.1", "eth1"), N("224.0.0.1", "eth2"), N("192.168.0.2", "eth3")]
+    assert mn.usableNetworkList(nets) == [N("192.168.0.1", "eth1")]
+    out = capsys.readouterr().out
+    assert "127.0.0.2" in out and "loopback" in out and "multicast" in out and "collides" in out
+
+
+def _sample_addresses():
+    import random
+    rnd = random.Random(1234)
+    ips = [ip for ip, _ in UNUSABLE] + USABLE + ["0.0.0.0", "127.0.0.1", "127.0.0.0", "9.255.255.255",
+                                                  "169.254.0.0", "223.0.0.0", "239.0.0.0", "254.1.1.1"]
+    ips += ["%d.%d.%d.%d" % tuple(rnd.randrange(256) for _ in range(4)) for _ in range(1500)]
+    # first-octet and 169.x sweeps: every class boundary
+    ips += ["%d.1.2.3" % a for a in range(256)] + ["169.%d.0.1" % b for b in range(256)]
+    return ips
+
+
+@pytest.mark.linux
+def test_the_three_layers_share_one_definition(repo_root):
+    """isGuestIpv4 (makeNetwork), usable_guest_ip (firmae/check.py) and
+    emu_guest_ipv4 (scripts/emulate.sh) accept exactly the same addresses."""
+    import re
+    import subprocess
+    from firmae import check
+    ips = _sample_addresses()
+    py = [mn.isGuestIpv4(ip) for ip in ips]
+    assert py == [check.usable_guest_ip(ip) for ip in ips]
+    text = (repo_root / "scripts" / "emulate.sh").read_text()
+    # the character lists and patterns, and the two functions, as emulate.sh has them
+    defs = [l for l in text.splitlines() if re.match(r"EMU_(D|NZ|AN|NUM|RE_IPV4|RE_OCTET)=", l)]
+    funcs = [re.search(r"^%s \(\) \{\n.*?^\}\n" % f, text, re.S | re.M) for f in ("emu_ipv4", "emu_guest_ipv4")]
+    assert len(defs) == 6 and all(funcs)
+    script = "\n".join(defs) + "\n" + "".join(f.group(0) for f in funcs)
+    script += 'for ip in "$@"; do emu_guest_ipv4 "$ip" && echo y || echo n; done\n'
+    res = subprocess.run(["bash", "-c", script, "_"] + ips, capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.split() == ["y" if ok else "n" for ok in py]
+    assert py.count(True) > 100 and py.count(False) > 100

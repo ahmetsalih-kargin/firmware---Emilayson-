@@ -9,7 +9,6 @@ import subprocess
 
 import pytest
 
-from scripts import makeNetwork as mn
 
 pytestmark = pytest.mark.linux
 
@@ -108,11 +107,13 @@ def test_release_emulation_removes_the_rules(world):
     assert rules(state) == []
 
 
-def test_generated_run_sh_isolates_after_the_network_and_before_qemu(firmae_env):
-    out = mn.qemuCmd(1, [("192.168.0.1", "eth0", None, None, "br0")], [], "normal",
-                     "mips", "el", "rdinit=/firmadyne/preInit.sh", False)
+def test_emulate_sh_isolates_after_the_network_and_before_qemu(repo_root):
+    """Structure of scripts/emulate.sh (the former run.sh template); the
+    runtime order is checked in test_generated_run_sh.py and, against the old
+    script, in test_emulate_equivalence.py."""
+    out = (repo_root / "scripts" / "emulate.sh").read_text()
     # "\nisolate_...": the cleanup function also contains "unisolate_guest_network ${IID}"
-    assert out.index("sudo tunctl -t ${TAPDEV_0}") < out.index("\nisolate_guest_network ${IID}\n") \
-        < out.index("-kernel ${KERNEL}")
+    assert out.index("\nstart_net\n") < out.index("\nisolate_guest_network ${IID}\n") \
+        < out.index('"${QEMU}" "${QEMU_ARGS[@]}" &')
     cleanup = out[out.index("cleanup () {"):out.index("trap cleanup EXIT")]
     assert cleanup.index("        stop_net\n") < cleanup.index("unisolate_guest_network ${IID}")

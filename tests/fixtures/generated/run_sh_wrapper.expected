@@ -1,0 +1,12 @@
+#!/bin/bash
+# Written by scripts/makeNetwork.py for image 1. No per-image logic here:
+# scripts/emulate.sh runs the emulation with the values in emulation.conf
+# next to this file. Start it from the FirmAE directory as run.sh,
+# run_debug.sh, run_analyze.sh or run_boot.sh.
+for FIRMAE_ROOT in . .. ../..; do
+    if [ -e "${FIRMAE_ROOT}/firmae.config" ]; then
+        exec /bin/bash "${FIRMAE_ROOT}/scripts/emulate.sh" "${0}" 1 "${FIRMAE_ROOT}"
+    fi
+done
+echo "Error: Could not find 'firmae.config'!"
+exit 1
