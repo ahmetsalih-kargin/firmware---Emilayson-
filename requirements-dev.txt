@@ -1,4 +1,5 @@
 # Development/test dependencies only. Runtime dependencies live in requirements.txt.
-# pytest 6.2.4 (pinned in requirements.txt for the analyzer) does not run on Python 3.12;
-# the test suite needs a newer version. Ubuntu 24.04: `apt install python3-pytest` (7.4.x).
+# The old pytest 6.2.4 pin (analyzer) is gone from requirements.txt: it does not run on
+# Python 3.12, and the test suite needs a newer version.
+# Ubuntu 24.04: `apt install python3-pytest` (7.4.x).
 pytest>=7.4

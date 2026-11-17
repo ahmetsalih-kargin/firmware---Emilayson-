@@ -92,3 +92,32 @@ def test_cleanup_sh_targets_only_firmae(repo_root, tmp_path, fake_system):
     assert [x for x in c if x.startswith("umount")] == [
         "umount /work/FirmAE/scratch/12/image", "umount /home/u/FirmAE/scratch/3/image"]
     assert [x for x in c if x.startswith("losetup -d")] == ["losetup -d /dev/loop5", "losetup -d /dev/loop6"]
+
+
+@pytest.mark.parametrize("env_pw, expected", [(None, "firmadyne"), ("s3cret", "s3cret")])
+def test_delete_sh_passes_the_db_password_to_psql_only(repo_root, tmp_path, fake_system, env_pw, expected):
+    """pg_hba.conf is md5: psql needs PGPASSWORD (FIRMAE_DB_PASSWORD, default firmadyne),
+    set in psql's own environment and nowhere else."""
+    bindir, log = fake_system
+    root = tmp_path / "FirmAE"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy(repo_root / "firmae.config", root)
+    shutil.copy(repo_root / "scripts" / "delete.sh", root / "scripts")
+    stub(bindir, "mountpoint", "exit 1")
+    stub(bindir, "losetup", "exit 0")
+    stub(bindir, "ip", "exit 0")
+    stub(bindir, "psql", 'echo "psql PGPASSWORD=${PGPASSWORD-UNSET} $*" >> "%s"' % log)
+    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]))
+    env.pop("FIRMAE_DOCKER", None)
+    env.pop("PGPASSWORD", None)
+    env.pop("FIRMAE_DB_PASSWORD", None)
+    if env_pw:
+        env["FIRMAE_DB_PASSWORD"] = env_pw
+    res = subprocess.run(["bash", "./scripts/delete.sh", "7"], cwd=root, env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stdout + res.stderr
+    psql = [x for x in calls(log) if x.startswith("psql ")]
+    assert len(psql) == 1 and psql[0].startswith("psql PGPASSWORD=%s " % expected), psql
+    assert "id=7;" in psql[0]
+    if env_pw:
+        assert env_pw not in res.stdout + res.stderr          # never echoed

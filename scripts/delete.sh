@@ -63,7 +63,8 @@ sudo bash -c 'source ./firmae.config && unisolate_guest_network "$1"' _ ${IID} |
 
 #Cleanup database:
 echo "Remove the database entries ..."
-psql -d firmware -U firmadyne -h $PSQL_IP -t -q -c "DELETE from image WHERE id=${IID};"
+# (pg_hba.conf requires a password for firmadyne: pass it in psql's environment only)
+PGPASSWORD="${FIRMAE_DB_PASSWORD:-firmadyne}" psql -d firmware -U firmadyne -h "${PSQL_IP}" -t -q -c "DELETE from image WHERE id=${IID};"
 
 #Cleanup filesystem:
 echo "Clean up the file system ..."

@@ -23,7 +23,7 @@ class FirmwarePipeline(FilesPipeline):
         if settings and "SQL_SERVER" in settings:
             import psycopg2
             self.database = psycopg2.connect(database="firmware", user="firmadyne",
-                                             password="firmadyne", host=settings["SQL_SERVER"],
+                                             password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=settings["SQL_SERVER"],
                                              port=5432)
         else:
             self.database = None

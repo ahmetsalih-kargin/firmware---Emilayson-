@@ -220,7 +220,8 @@ def test_console_c_checks_the_result_of_open(repo_root):
 
 
 def test_database_password_comes_from_the_environment(repo_root):
-    for rel in ("scripts/util.py", "scripts/tar2db.py", "scripts/getArch.py", "sources/extractor/extractor.py"):
+    for rel in ("scripts/util.py", "scripts/tar2db.py", "scripts/getArch.py", "sources/extractor/extractor.py",
+                "sources/scraper/firmware/pipelines.py"):
         text = (repo_root / rel).read_text()
         assert 'password="firmadyne"' not in text, rel
         assert 'os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne")' in text, rel

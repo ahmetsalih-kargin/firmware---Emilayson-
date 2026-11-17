@@ -44,7 +44,11 @@ class Initializer:
         options = webdriver.ChromeOptions()
         options.binary_location = "/usr/bin/google-chrome-stable"
         options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
+        # Chrome refuses to start as root with its sandbox on; keep the sandbox
+        # otherwise (SECURITY.md S11). FIRMAE_CHROME_NO_SANDBOX=1 forces it off.
+        if (hasattr(os, "geteuid") and os.geteuid() == 0) or \
+                os.environ.get("FIRMAE_CHROME_NO_SANDBOX") == "1":
+            options.add_argument("--no-sandbox")
         options.add_argument("--screen-size=1200x600")
         self.driver = webdriver.Chrome(options=options)
         if self.auth:

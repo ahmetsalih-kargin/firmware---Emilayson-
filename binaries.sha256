@@ -1,0 +1,44 @@
+# SHA-256 checksums of the files that download.sh fetches into ./binaries/.
+# Format: `sha256sum` output ("<64 hex digits>  <file name>"), one line per file;
+# download.sh checks each download against this list. The file is validated strictly
+# (any malformed or duplicate line aborts download.sh): the hash is UNKNOWN or exactly
+# 64 hex digits, the file name a bare name ([A-Za-z0-9._+-]+, optional leading `*`),
+# LF or CRLF line ends.
+#
+# Every hash is still UNKNOWN: filling them needs a download, which has to be a
+# deliberate step. To fill the list, download the files from a source you trust
+# (for example `FIRMAE_VERIFY_DOWNLOADS=warn ./download.sh`), check that they are
+# the intended release files, then run in this directory:
+#     (cd binaries && sha256sum *) | sort -k2 > /tmp/sums
+# and replace the UNKNOWN lines below with the matching lines.
+#
+# While a hash is UNKNOWN, FIRMAE_VERIFY_DOWNLOADS decides: `warn` (default)
+# keeps the file and prints a warning, `strict` rejects it. A known hash that
+# does not match is always an error.
+UNKNOWN  vmlinux.mipsel.2
+UNKNOWN  vmlinux.mipseb.2
+UNKNOWN  vmlinux.mipsel.4
+UNKNOWN  vmlinux.mipseb.4
+UNKNOWN  zImage.armel
+UNKNOWN  vmlinux.armel
+UNKNOWN  busybox.armel
+UNKNOWN  busybox.mipseb
+UNKNOWN  busybox.mipsel
+UNKNOWN  console.armel
+UNKNOWN  console.mipseb
+UNKNOWN  console.mipsel
+UNKNOWN  libnvram.so.armel
+UNKNOWN  libnvram.so.mipseb
+UNKNOWN  libnvram.so.mipsel
+UNKNOWN  libnvram_ioctl.so.armel
+UNKNOWN  libnvram_ioctl.so.mipseb
+UNKNOWN  libnvram_ioctl.so.mipsel
+UNKNOWN  gdb.armel
+UNKNOWN  gdb.mipseb
+UNKNOWN  gdb.mipsel
+UNKNOWN  gdbserver.armel
+UNKNOWN  gdbserver.mipseb
+UNKNOWN  gdbserver.mipsel
+UNKNOWN  strace.armel
+UNKNOWN  strace.mipseb
+UNKNOWN  strace.mipsel
