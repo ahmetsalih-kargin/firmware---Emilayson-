@@ -1,6 +1,7 @@
 """secure_workdir() in firmae.config (REFACTORING_PLAN 2.4, SECURITY.md S2)."""
 
 import os
+import re
 import stat
 import subprocess
 
@@ -41,6 +42,30 @@ def test_secure_workdir_removes_world_writable_bits(repo_root, tmp_path):
 
 def test_no_world_writable_chmod_left_in_host_scripts(repo_root):
     """Regression guard: the old `chmod -R a+rwx` / `chmod a+rw` must not come back."""
-    for rel in ("run.sh", "scripts/makeImage.sh"):
+    for rel in ("run.sh", "scripts/makeImage.sh", "firmae/image.py"):
         text = (repo_root / rel).read_text()
         assert "a+rwx" not in text and "a+rw " not in text and 'a+rw "' not in text, rel
+    # makeImage's host side (Python since 4.3): no group/world-writable chmod of
+    # anything in scratch/<IID> (image.raw, init, service)
+    text = (repo_root / "firmae/image.py").read_text()
+    for m in re.finditer(r"\b(?:f?chmod)\([^)]*?(0o[0-7]+)\)", text):
+        assert not int(m.group(1), 8) & 0o022, m.group(0)
+
+
+def test_make_image_leaves_its_results_not_writable_by_others(tmp_path):
+    from firmae import image
+    img, work = tmp_path / "img", tmp_path / "work"
+    (img / "firmadyne").mkdir(parents=True)
+    work.mkdir()
+    (img / "firmadyne/init").write_text("/sbin/init\n")
+    (img / "firmadyne/init").chmod(0o777)
+    (img / "firmadyne/service").write_text("/bin/boa")
+    (img / "firmadyne/service").chmod(0o666)
+    old = os.umask(0)
+    try:
+        image.take_result(str(img), "init", str(work), move=True)
+        image.take_result(str(img), "service", str(work), move=False)
+    finally:
+        os.umask(old)
+    assert mode(work / "init") == 0o644
+    assert mode(work / "service") == 0o644

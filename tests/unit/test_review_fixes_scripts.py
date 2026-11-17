@@ -323,31 +323,35 @@ def test_file_type_has_no_whitespace(inf, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# 8. makeImage.sh: /bin/a may be a FIFO, a symlink or a device planted by the guest
+# 8. makeImage (firmae/image.py since 4.3): /bin/a may be a FIFO, a symlink or
+#    a device planted by the guest
 # --------------------------------------------------------------------------
 
+class _MakeImageResult:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
 @pytest.fixture
-def make_image_part(repo_root, tmp_path):
-    """The /bin/a block of makeImage.sh run against a fake image tree (no root,
-    no mount)."""
-    src = (repo_root / "scripts/makeImage.sh").read_text()
-    helper = re.search(r"image_path \(\) \{.*?\n\}\n", src, re.S).group(0)
-    block = re.search(r"INJECTION_CHECKER=.*?chmod a\+x \"\$\{INJECTION_CHECKER\}\"\n", src, re.S).group(0)
+def make_image_part(tmp_path):
+    """The /bin/a step of makeImage (firmae.image.install_injection_checker)
+    run against a fake image tree (no root, no mount)."""
+    from firmae import image as image_py
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    shutil.copy(str(repo_root / "scripts/imagepath.py"), str(scripts / "imagepath.py"))
     (scripts / "injectionChecker.sh").write_text("#!/bin/sh\necho checker\n")
     image = tmp_path / "image"
     (image / "bin").mkdir(parents=True)
     host = tmp_path / "host"
     host.mkdir()
     (host / "victim").write_text("host data\n")
-    script = tmp_path / "part.sh"
-    script.write_text("set -e\nset -u\n" + helper + block)
 
     def run():
-        return subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=20,
-                              env=dict(os.environ, IMAGE_DIR=str(image), SCRIPT_DIR=str(scripts)))
+        try:
+            image_py.install_injection_checker(str(image), str(scripts / "injectionChecker.sh"))
+        except image_py.ImageError as e:
+            return _MakeImageResult(e.code, stdout=str(e))
+        return _MakeImageResult(0)
     return image, host, run
 
 
@@ -360,7 +364,7 @@ def _installed(image):
 def test_fifo_at_bin_a_does_not_block(make_image_part):
     image, _, run = make_image_part
     os.mkfifo(str(image / "bin" / "a"))
-    res = run()                                   # timeout=20: the old cp blocked forever
+    res = run()                                   # the old cp blocked forever
     assert res.returncode == 0, res.stderr
     assert _installed(image)
 
@@ -400,9 +404,22 @@ def test_bin_that_is_not_a_directory_is_an_error(make_image_part):
     assert "not a directory" in res.stdout
 
 
-def test_other_writes_of_make_image_target_a_fresh_directory(repo_root):
-    """firmadyne/ is created with `mkdir` (fails if the firmware already has it),
-    so cp/mknod/touch into it cannot meet a planted FIFO/symlink."""
-    src = (repo_root / "scripts/makeImage.sh").read_text()
-    assert re.search(r'^mkdir "\$\{IMAGE_DIR\}/firmadyne/"$', src, re.M)
-    assert not re.search(r"^mkdir -p .*firmadyne", src, re.M)
+def test_other_writes_of_make_image_target_a_fresh_directory(tmp_path):
+    """firmadyne/ is still created with mkdir, not mkdir -p: it fails if the
+    firmware already has it (even as a symlink), as before. Since 4.3 the
+    writes into it no longer rely on that alone -- the chroot'ed inferFile.sh
+    can plant symlinks there (tests/unit/test_image_py.py)."""
+    from firmae import image as image_py
+    for planted in ("dir", "symlink"):
+        root = tmp_path / planted
+        root.mkdir()
+        if planted == "dir":
+            (root / "firmadyne").mkdir()
+        else:
+            os.symlink(str(tmp_path), str(root / "firmadyne"))
+        with pytest.raises(image_py.ImageError, match="File exists"):
+            image_py.make_firmadyne_dirs(str(root))
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    image_py.make_firmadyne_dirs(str(fresh))
+    assert sorted(os.listdir(str(fresh / "firmadyne"))) == ["libnvram", "libnvram.override"]
