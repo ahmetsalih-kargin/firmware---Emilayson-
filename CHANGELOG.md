@@ -6,6 +6,59 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 6.2 / 6.3 — command-line trace and aggregate report (2026-11-17, "group 3")
+
+Scope of 6.2 was agreed as "command-line trace": no guest-side `strace`, no pipeline change. Measured on two real
+analyze-mode logs (see `TEST_REPORT.md` "Faz 6.2 / 6.3 / 7"); `firmae.hwreport` was **not** run on a real firmware set.
+
+- **`firmae/hwserial.py`:** analyze mode (`firmadyne.syscall=32`) logs no `open`/`openat`/`ioctl`, only `execve`
+  (`[ANALYZE] [PID: n (comm)]: argv`) and `sys_reboot`. These lines are parsed (anchored, linear time) into
+  `dynamic.exec` (`commands`, `device_args`, `hw_tools`, `truncated`; caps 200/200/3 per device, 64 tokens per line).
+  Error text inside exec lines is deliberately not counted as generic events (the former false-positive `gpio_error`
+  from a command line is gone).
+- **`firmae/hwprofile.py`:** exec evidence is used for statuses: exec-only evidence gives `referenced`; i2c/spi with
+  exec-only evidence gives `unsupported`; never `covered`; `failing` and static results are never changed by it.
+  `--help` shows the manual fold-in (`--update` with `--serial-log` for `qemu.initial.serial.log` and
+  `qemu.final.serial.log`). **Behaviour change:** none for logs without `[ANALYZE]` lines (outputs byte-identical to
+  `ad1aad7` on 14 fixtures and on real normal-mode logs).
+- **`firmae/hwreport.py` (new, minimal 6.3):** `python3 -m firmae.hwreport [--scratch DIR] [--format md|csv|json]
+  [--out FILE] [--force]`. Read-only scan of `scratch/<IID>/`; `unsupported`/`failing` are never shown as success;
+  `--out` is created exclusively (`--force` replaces a single-link regular file only); exit 0, or 2 on usage errors
+  or an unreadable scratch root.
+- **Tests:** `tests/unit/test_hwreport.py` (new), additions in `test_hwserial.py` and `test_hwprofile.py`, fixture
+  `tests/fixtures/serial/hw_analyze.log`, `tests/unit/golden_hwserial.json`.
+
+### Phase 7 — dependencies and installation, decision-free part (2026-11-17)
+
+Code and unit tests only: `install.sh` and `core/Dockerfile` were **not run / built**. Hashes in `binaries.sha256` are
+all `UNKNOWN` (filling them needs downloads: user decision). Tests: `tests/unit/test_install_scripts.py`,
+`test_initializer_sandbox.py`, additions in `test_cleanup_scripts.py` and `test_audit_fixes.py`.
+
+- **`scripts/delete.sh`** passes `PGPASSWORD="${FIRMAE_DB_PASSWORD:-firmadyne}"` to psql only (pg_hba is md5, so the
+  database cleanup used to fail); `$PSQL_IP` quoted. `sources/scraper/firmware/pipelines.py` reads `FIRMAE_DB_PASSWORD`
+  (SECURITY.md S13 complete).
+- **`install.sh`.** Changes to its own directory (CDPATH-safe); the binwalk build and the routersploit patch run in
+  subshells (no `cd -`) and the binwalk download is removed afterwards only if this run created it; PostgreSQL is
+  restarted **after** the `postgresql.conf`/`pg_hba.conf` edits (they never applied before), after `systemctl start docker`
+  (`listen_addresses` includes 172.17.0.1); `groupadd` only if the group is missing; `"$USER"` quoted; the two config
+  appends are idempotent. No `set -e`/`set -u` (deliberately).
+  **Behaviour change:** on an externally managed Python (PEP 668, e.g. Ubuntu 24.04) it prints an explanation and exits 1
+  before the first `pip install` unless `PIP_BREAK_SYSTEM_PACKAGES=1` or `FIRMAE_PIP_ARGS=--break-system-packages` is set
+  (a venv is not offered: the pipeline runs as root with the system Python). The guard checks the interpreter that runs
+  pip (not true in a venv); `FIRMAE_PIP_ARGS` is appended to every pip install. PostgreSQL is started before `CREATE USER`;
+  the binwalk cleanup uses `sudo rm -rf` (setup.py leaves root-owned files).
+- **`analyses/initializer.py`:** `--no-sandbox` only as root or with `FIRMAE_CHROME_NO_SANDBOX=1`. The pipeline runs as
+  root, so nothing changes in practice; S11 stays open.
+- **`requirements.txt`:** `pytest` removed (`requirements-dev.txt` has it); comment headers say where each package is
+  used. No other package changed.
+- **`core/Dockerfile`:** `apt-key` replaced by `gnupg` + `/usr/share/keyrings/google-chrome.gpg` + `signed-by`, https
+  source; `chmod 755 /usr/bin/sudo` instead of 777. Base image unchanged.
+- **`download.sh` + `binaries.sha256`:** each file is downloaded to `binaries/.<name>.part`, checked, then moved into
+  place. Unknown/unlisted hash: `FIRMAE_VERIFY_DOWNLOADS=warn` (default) keeps the file with a WARNING, `strict`
+  rejects it; a known hash mismatch always deletes and exits 1. `binaries.sha256` is validated strictly first (CRLF tolerated; malformed/duplicate line = exit 1 in both modes). A symlink or non-regular file at the destination is an error; the `.part` file is removed on INT/TERM/HUP/EXIT. Already-present files are verified too (a mismatching one
+  is downloaded again). The script now changes to its own directory. **Behaviour change:** `wget -N` timestamping is gone.
+- `.gitattributes`: `binaries.sha256` is LF.
+
 ### Phase 4.3 / 4.4 / 4.5 — `firmae/image.py`, `emulation.conf`, `firmae/check.py` (2026-11-17, "group 2")
 
 Measured on real emulation (WSL2, DIR-868L armel and WNAP320 mipseb, TAP mode; see `TEST_REPORT.md` "Grup 2"). The DHCP

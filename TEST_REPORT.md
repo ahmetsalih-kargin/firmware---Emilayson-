@@ -2,7 +2,7 @@
 
 > **Not (2026-11-17):** Faz 2–5 ve ikinci tur bölümlerindeki "commit edilmemiş" ifadeleri **ölçüm anını** anlatan tarihsel
 > kayıttır; kodun tamamı sonradan commit edilmiş ve `origin/refactor/hardening`'e push edilmiştir (HEAD `d9aaee7`, dalda 136 commit).
-> Güncel birim test sayısı 1076 (çalışma ağacı, bkz. "Faz 2.10 / 5.1 / 4.2").
+> Güncel birim test sayısı en yeni bölümde yazılıdır (`ad1aad7`'de 1473, bkz. "Faz 4.3 / 4.4 / 4.5 — grup 2").
 
 ## Faz 0 — Değişiklik öncesi temel çizgi (2026-11-04)
 
@@ -822,3 +822,26 @@ Kod: `firmae/image.py` (makeImage), `scratch/<IID>/emulation.conf` + statik `scr
 ### C) Ortam notu
 
 Harness eşitlemesi bir kez sessizce başarısız oldu: `~/FirmAE` içindeki root sahipli `__pycache__` yüzünden dosyalar kopyalanamadı. Ölçüm düzeneği kopyasında düzeltildi; bayat ağaçta yapılan ilk takım koşusu **atıldı**.
+
+## Faz 6.2 / 6.3 / 7 — grup 3 (2026-11-17)
+
+Kod: `firmae/hwserial.py` + `firmae/hwprofile.py` (6.2, komut satırı izi), `firmae/hwreport.py` (6.3), kurulum/indirme betikleri (Faz 7). Ölçülenler ile ölçülmeyenler ayrıdır.
+
+### A) Ölçülenler
+
+- **Analyze modu ölçümü (gerçek, `firmadyne.syscall=32`):** analyze modu `open`/`openat`/`ioctl` kaydetmiyor; yalnızca `execve` ve `sys_reboot`.
+  - **A:** 20899 `[ANALYZE]` satırı, 1 `sys_reboot` izi, `open`/`ioctl` yok; log 1,32 MB → 4,44 MB.
+  - **B:** 321 satır; 43 KB → 122 KB.
+  - Koşular tasarım gereği 124 ile çıkar (zaman aşımı 300 sn); temizlik sayaçları 0.
+- **6.2 sonuçları (iki gerçek analyze logunda):** A: `device_args` `/dev/mtdblock/4` ×7, `hw_tools` yok, `gpio_error` 4 → 2 (yanlış pozitif kalktı). B: `/dev/mtd5` ×2, `flash_erase` ×1. Her ikisinde durum değişikliği 0.
+- **Uyumluluk:** `[ANALYZE]` içermeyen loglar için çıktılar `ad1aad7` ile bayt bayt aynı (14 fixture + gerçek normal mod logları).
+- **Tam birim takımı** (denetim düzeltmelerinden önce): **1655 geçti**, 327 sn.
+- **Bağımsız denetim (Opus):** kritik/yüksek bulgu yok; 2 orta (uyarı modunda CRLF ile sha256 listesi atlatma; PEP 668 korumasının kendi kaçış yolunu engellemesi) ve düşük bulgular düzeltildi; hayatta kalan mutasyonlar kapatıldı.
+
+### B) Ölçülmeyenler
+
+- `install.sh` gerçek koşusu ve `docker build`.
+- Gerçek indirmeler (hash'ler `UNKNOWN`).
+- `firmae.hwreport`'un gerçek bir scratch setinde çalıştırılması.
+- Python 3.8 çalışma zamanı.
+- Grup 3 için gerçek emülasyon yeniden koşusu yok: değişiklikler yalnızca son işleme ve kurulum betiklerini etkiler; uyumluluk gerçek loglarda bayt bayt aynı çıktıyla gösterildi.

@@ -327,7 +327,7 @@ olmadığı — WSL2'de dinamik test ile doğrulanacak.
 > (boru hattı bağlantısı) üzerinden eklendi ve **iki firmware (DIR-868L ARM, WNAP320 MIPS) ile
 > gerçek emülasyon koşusunda doğrulandı** (ölçümler: TEST_REPORT.md "Faz 6.1"). Doğrulanmayanlar:
 > Python 3.8, ikinci bağımsız denetim, analyze/debug/run/boot ve Docker modları, daha geniş
-> firmware seti. Strace ile dinamik izleme ve `libhwmock` (9.2.3) **yapılmadı.**
+> firmware seti. Komut satırı izi (9.2.1b) ve asgari toplu rapor (9.2.1c) birim testli eklendi (iki gerçek analyze logunda ölçüldü; rapor gerçek sette çalıştırılmadı). Guest içi strace ile dinamik izleme ve `libhwmock` (9.2.3) **yapılmadı.**
 
 #### 9.2.1 Profil akışı (uygulandı, iki firmware ile gerçek koşuda doğrulandı)
 
@@ -412,6 +412,40 @@ ve `failing` değerlerini öne alır. Profil bir uyarıdır, emülasyonun başar
 tersi de geçerlidir: `covered` olması cihazın doğru davrandığı anlamına gelmez (kernel
 stub'ları her `open/write/ioctl`'i başarılı sayar).
 
+#### 9.2.1b Komut satırı izi: `dynamic.exec` (6.2, uygulandı)
+
+Ölçüm (2026-11-17, iki gerçek analyze logu): analyze modu (`firmadyne.syscall=32`) `open`/`openat`/`ioctl`
+**kaydetmez**; yalnızca `execve` (`[ANALYZE] [PID: n (comm)]: argv`) ve `sys_reboot` izi bırakır.
+`firmae/hwserial.py` bu satırları (bağlantılı, doğrusal zamanlı ifadeyle) `dynamic.exec` altına ayrıştırır:
+`commands` (en çok 200 ayrı komut adı), `device_args` (en çok 200 yol, yol başına en çok 3 komut adı),
+`hw_tools` (i2c/spi/flash araçları) ve `truncated` (kernel satırı kesmiş olabilir). Satır başına en çok 64 belirteç.
+
+`firmae/hwprofile.py` bunları şu kurallarla kanıt sayar: yalnızca exec kanıtı olan çevre birimi `referenced`;
+i2c/spi için yalnızca exec kanıtı varsa `unsupported`; exec kanıtı hiçbir zaman `covered` yapmaz; `failing` ve statik
+sonuçları değiştirmez. Boru hattı değişmedi; analyze logu elle eklenir (`python3 -m firmae.hwprofile --update --out
+scratch/<IID>/hw_profile.json --serial-log scratch/<IID>/qemu.initial.serial.log --serial-log
+scratch/<IID>/qemu.final.serial.log`). Guest yalnızca sahte `[ANALYZE]` satırlarıyla kanıt **ekleyebilir**.
+
+**Uyarı: komut satırı ≠ başarılı donanım erişimi.** Bir komutun argümanında `/dev/mtd5` geçmesi cihazın açıldığını
+ya da çalıştığını göstermez. Exec satırlarının içindeki hata metni bilerek genel olay olarak sayılmaz (bir komut
+satırındaki "error" kelimesi yanlış pozitif üretiyordu).
+
+#### 9.2.1c Toplu rapor (hwreport, 6.3, asgari; gerçek sette çalıştırılmadı)
+
+`python3 -m firmae.hwreport [--scratch DIR] [--format md|csv|json] [--out FILE] [--force]`, `scratch/<IID>/` altında
+önceki koşuların bıraktığını salt okunur tarar: `brand`, `name`, mimari, `ping`, `web`, `result` ve `hw_profile.json`.
+Firmware başına ve toplamda her çevre biriminin durumunu ve emülasyon sonucuyla ilişkisini verir; `unsupported` ve
+`failing` adlarıyla listelenir, hiçbir zaman başarı sayılmaz (`referenced` = "görüldü", "çalışıyor" değil).
+
+*Güven modeli:* `scratch/<IID>/` altındaki her girdi güvenilmezdir. Yalnızca kanonik pozitif tamsayı adlı dizinler
+gezilir; dosyalar dizin tanıtıcısına göre `dir_fd` + `O_NOFOLLOW` ile açılır, `S_ISREG` olmalı ve boyut sınırıyla
+okunur (tek satırlık dosyalar 4 KiB, profil 2 MiB); mantıksal değerler tam `true` olmalı; mimari ve durumlar sabit
+beyaz listelerden gelir; serbest metin yalnızca `brand`/`name`'dir, temizlenir (yazdırılabilir ASCII, uzunluk sınırı)
+ve biçime göre kaçışlanır (CSV formül önekleri, Markdown üst karakterleri, satır sonu yok). Sınırlar: en çok 100000
+IID, tarama başına 1M girdi. `--out` `O_EXCL|O_NOFOLLOW` ile oluşturulur; var olan yol `--force` olmadan reddedilir;
+symlink, hardlink'li dosya, FIFO ve dizine hiçbir koşulda yazılmaz. Çıkış kodu 0 (bozuk/eksik profiller dahil),
+kullanım hatası veya okunamayan scratch kökünde 2.
+
 #### 9.2.2 Keşif bulguları (ölçüm; yalnızca iki firmware)
 
 Örneklem dardır: **D-Link DIR-868L (ARM)** ve **Netgear WNAP320 (MIPS)**. WNAP320'nin rootfs'i
@@ -430,8 +464,9 @@ taranamadı; yalnızca dosya listesi ve seri log incelendi. Gözlemler:
 
 #### 9.2.3 Yapılmayanlar / öneri (uygulanmadı)
 
-- *Dinamik izleme:* `/firmadyne/strace -f -e open,ioctl` ile web servisini izlemek. İkili imajda
-  var ama hiçbir yerde çağrılmıyor (bkz. 9.1); ayrı bir profil modu olarak tasarlanmalı.
+- *Guest içi dinamik izleme:* `/firmadyne/strace -f -e open,ioctl` ile web servisini izlemek (6.2 seçenek B)
+  **yapılmadı**. İkili imajda var ama hiçbir yerde çağrılmıyor (bkz. 9.1). Yalnızca komut satırı izi
+  uygulandı (9.2.1b); o `open`/`ioctl` görmez.
 - Statik analiz firmware kodunu **çalıştırmaz** (yalnızca bayt okuma).
 
 **Taklit (mock) katmanları — veri gerektirirse, bu sırayla:**

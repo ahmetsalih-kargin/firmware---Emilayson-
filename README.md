@@ -19,7 +19,12 @@ By running our tool on the succesfully emulation firmware images, we discovered
 
 # Installation
 
-Note that we tested FirmAE on Ubuntu 20.04.
+Note that we tested FirmAE on Ubuntu 20.04. On Ubuntu 24.04 there are known issues:
+the system Python is externally managed (PEP 668), so `install.sh` stops unless you opt in to
+pip's `--break-system-packages` (`PIP_BREAK_SYSTEM_PACKAGES=1 ./install.sh` or
+`FIRMAE_PIP_ARGS=--break-system-packages ./install.sh`; this may break distribution-managed
+Python packages; a virtual environment does not work, because the pipeline runs as root with the system Python); and `sasquatch` (built by
+binwalk's `deps.sh`) does not build with GCC 13 without changes. See `TEST_REPORT.md`.
 
 1. Clone `FirmAE`
 ```console

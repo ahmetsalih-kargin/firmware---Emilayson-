@@ -44,8 +44,10 @@ DOĞRULANMADI = kod var ama gerçek çalıştırmada denenmedi.
 | 5.3 | KISMEN | Soketler `scratch/IID/run/` altında, `debug.py` yeni yolu okur; **`/tmp` uyumluluk symlink'i yok** |
 | 5.4 | KISMEN | `ip netns` yerine iptables/ip6tables kuralları; `ip6tables` yoksa IPv6 sessizce yalıtılmaz |
 | 6.1, 6.1b | DOĞRULANMADI | Uygulandı, iki firmware ile gerçek koşuda denendi (DIR-868L ARM, WNAP320 MIPS); ikinci bağımsız denetim ve analyze/debug/run/boot/Docker modlarında doğrulama yok |
-| 6.2–6.5 | YOK | Açık (strace profil modu, rapor, `libhwmock` kararı, kernel kanca hataları) |
-| 7 | YOK | Hiç başlanmadı |
+| 6.2 | DOĞRULANMADI | "Komut satırı izi" kapsamında uygulandı (guest içi `strace` yapılmadı); iki gerçek analyze logunda ölçüldü, gerçek emülasyon yeniden koşulmadı |
+| 6.3 | DOĞRULANMADI | Asgari `firmae.hwreport` uygulandı (birim testli); gerçek bir firmware setinde çalıştırılmadı |
+| 6.4, 6.5 | YOK | Açık (`libhwmock` kararı, kernel kanca hataları) |
+| 7 | KISMEN | Karar gerektirmeyen kısım uygulandı (kod + birim test; `install.sh`/`core/Dockerfile` çalıştırılmadı); hash'ler `UNKNOWN`, geri kalanı kullanıcı kararı bekliyor |
 | Modlar | DOĞRULANMADI | analyze (`-a`), debug, run, boot, Docker ve DHCP modları **hiç gerçek koşulmadı** |
 | `mount.sh`/`umount.sh` | — | Depoda hiçbir yerden çağrılmıyor (yalnızca kullanım metni/yorum) |
 
@@ -60,7 +62,7 @@ DOĞRULANMADI = kod var ama gerçek çalıştırmada denenmedi.
 | 4 Python orkestrasyonu | **kısmen** | ✅ 4.1, 4.2 (gerçek QEMU ile TAP modunda ölçüldü, 2026-11-17), 4.3 (asgari: `firmae/image.py`, aynı dış araçlar), 4.4 (asgari: `emulation.conf` + statik `emulate.sh`, Bash üretimi yok), 4.5 (`firmae/check.py`) — üçü de 2026-11-17'de gerçek emülasyonla ölçüldü; 4.6'nın orkestrasyon kısmı ve 4.7'nin kilit/zaman aşımı kısmı. ❌ tam Python başlatıcı ve yerel loop/mount/`tarfile` (4.3/4.4 seçenek B), ❌ `stages/`/`arch.py`/`modes.py`, ❌ metrikler ve `systemd-run` |
 | 5 Ağ izolasyonu | **kısmen** | 5.1 (DHCP `hostfwd` dinamik loopback portları; analiz araçları hâlâ eski varsayımda), 5.2, 5.3 (symlink yok), 5.4 (iptables). **DHCP modu gerçek testsiz**, L2 (ARP) kapsam dışı; TAP adları/güvenlik duvarı etiketi host genelinde tek ad alanı |
 | İkinci sağlamlaştırma turu (2026-11-16, plan dışı) | ✅ | İki tur + bağımsız denetim: `SECURITY.md` S19-S25 (seri logdan komut enjeksiyonu P0 dahil), kilitler, zaman aşımları, sınırlar, `tar2db`/`util`/`extractor`/`docker-helper` hata yönetimi. Commit edilmiş ve push edilmiştir. Ayrıntı: `CHANGELOG.md`, `TEST_REPORT.md` |
-| **6 Peripheral (Problem 1)** | **kısmen** | 6.1 + seri log kanıtı **uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (profil bilgi amaçlıdır, emülasyon sonucunu etkilemez); 6.2 (strace), 6.3 (rapor), 6.4 (`libhwmock`, toolchain + kernel preload sorusu) ve 6.5 (kernel kanca kayıt hataları) açık. Mock yok |
+| **6 Peripheral (Problem 1)** | **kısmen** | 6.1 + seri log kanıtı **uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (profil bilgi amaçlıdır, emülasyon sonucunu etkilemez); 6.2 (komut satırı izi) ve 6.3 (asgari `firmae.hwreport`) **uygulandı, birim testli** (gerçek firmware setinde rapor çalıştırılmadı); 6.4 (`libhwmock`, toolchain + kernel preload sorusu) ve 6.5 (kernel kanca kayıt hataları) açık. Mock yok |
 | **7 Bağımlılık/kurulum** | **❌ hiç başlanmadı** | Eski bağımlılıklar, `download.sh` checksum, `apt-key`, chromedriver 2.38, `ubuntu:20.04`, Ubuntu 24.04'te `install.sh` |
 
 Üç ana problem: **Problem 1 (peripheral)** yalnızca ölçüm tarafında başladı (donanım profili, iki firmware ile gerçek koşuda doğrulandı; mock yok); **Problem 2 (monolitik Bash)** kısmen
@@ -183,16 +185,31 @@ karşılaştırılır (Faz 0 temel çizgisi + Faz 1 karakterizasyon testleri).
 |---|---|
 | 6.1 | `firmae/hwprofile.py` statik tarama + sınıflandırma + `hw_profile.json`; birim testleri sentetik rootfs ile. **Uygulandı ve iki firmware ile gerçek koşuda doğrulandı (2026-11-17)** (uygulama 2026-11-16; ölçümler: TEST_REPORT.md "Faz 6.1"): `firmae/pipeline.py` `hwprofile` adımını mimari tespitinden sonra, `hwprofile-dynamic` adımını `makeNetwork`'ten sonra çağırır; bilgi amaçlıdır, emülasyon sonucunu/çıkış kodunu etkilemez (`FIRMAE_HWPROFILE=0` ile kapanır). Boru hattı tarafı sahte CLI ile ve ayrıca gerçek `firmae.hwprofile` ile (sentetik tarball + kayıtlı seri log, `test_hwprofile_integration.py`) birim testli; gerçek QEMU koşusunda DIR-868L (ARM) ve WNAP320 (MIPS) ile denendi (iki tur, ağ-hatası yolu, Ctrl-C; sonuçlar ve `run.sh` profil adımından etkilenmedi). Bağımsız denetim (2026-11-17) bulguları (profilleyici bellek/özyineleme, yanlış pozitifler, zaman aşımı tutarsızlığı, bayat profil) düzeltildi — düzeltme sonrası ikinci bir bağımsız denetim yapılmadı (**açık**); ağ çıkarımı başarısızken de dinamik adım çalışır, eski profil statik adımdan önce silinir (SECURITY.md S26). **Açık maddeler:** sayaçların log başına ayrı raporlanması (şimdi ilk+son logun toplamı); ikinci bağımsız denetim; Python 3.8, analyze/debug/run/boot ve Docker modlarında doğrulama |
 | 6.1b | **Seri log kanıtı** (`qemu.initial/final.serial.log` → `--update`): **uygulandı ve gerçek koşuda doğrulandı (2026-11-17)** |
-| 6.2 | Profil modu: guest'te `/firmadyne/strace` ile `open/ioctl` izleme — **açık** (ikili imaja kopyalanıyor ama hiçbir yerde çağrılmıyor) |
-| 6.3 | Faz 0 firmware seti üzerinde rapor: hangi cihazlar `UNSUPPORTED`, emülasyon sonucu ile ilişkisi — **açık** (yalnızca iki firmware'de elle keşif yapıldı: DIR-868L ARM, WNAP320 MIPS; bkz. `ARCHITECTURE.md` 9.2.2) |
+| 6.2 | **Uygulandı, kullanıcı onaylı kapsam "komut satırı izi" (2026-11-17).** Ölçüm: analyze modu (`firmadyne.syscall=32`) `open`/`openat`/`ioctl` **kaydetmiyor**, yalnızca `execve` (`[ANALYZE] [PID: n (comm)]: argv`) ve `sys_reboot` kaydediyor. `firmae/hwserial.py` bu satırları `dynamic.exec` altına ayrıştırır (`commands`, `device_args`, `hw_tools`, `truncated`); `firmae/hwprofile.py` bunları kanıt olarak kullanır: yalnızca exec kanıtı → `referenced`; i2c/spi için yalnızca exec kanıtı → `unsupported`; asla `covered` yapmaz; `failing` ve statik sonuçları değiştirmez. Boru hattı değişmedi; elle ekleme: `python3 -m firmae.hwprofile --update --out scratch/<IID>/hw_profile.json --serial-log scratch/<IID>/qemu.initial.serial.log --serial-log scratch/<IID>/qemu.final.serial.log`. Komut satırı ≠ başarılı donanım erişimi. **Yapılmadı:** guest içi `strace` (seçenek B; `/firmadyne/strace` hâlâ çağrılmıyor). İki gerçek analyze logunda ölçüldü (TEST_REPORT.md "Faz 6.2 / 6.3 / 7"); gerçek emülasyon yeniden koşulmadı |
+| 6.3 | **Asgari sürüm uygulandı:** `python3 -m firmae.hwreport [--scratch DIR] [--format md\|csv\|json] [--out FILE] [--force]` (`scratch/<IID>/` altını salt okunur tarar; bkz. `ARCHITECTURE.md` 9.2.1c, SECURITY.md S32). Birim testli; **gerçek bir firmware setinde (Faz 0 seti dahil) çalıştırılmadı**, dolayısıyla "hangi cihazlar `UNSUPPORTED`, emülasyon sonucu ile ilişkisi" sorusu gerçek veriyle yanıtlanmadı |
 | 6.4 | **Karar noktası (ayrı onay):** veriler gerektiriyorsa `libhwmock` (I2C/SPI işlem seviyesi) — **açık.** Çapraz derleme toolchain kararı dahil; ayrıca `LD_PRELOAD`'ı bu depo değil hazır enstrümante kernel yüklüyor, ikinci bir preload kütüphanesi kernel değişikliği ya da başka bir yükleme yolu gerektirebilir. Gerçek bir libc interposer olmalı (statik ikililer ve doğrudan syscall'lar kapsanmaz). Keşifte I2C/SPI kullanan firmware bulunmadı; ihtiyaç gösterilmedi |
 | 6.5 | **Yeni, açık:** her iki mimaride (ARM: `watchdog`, `wdt`; MIPS: `gpio`, `watchdog`, `wdt`) firmadyne kernel kancalarının `Cannot register character device` hatasının incelenmesi — kernel stub'larının gerçekte çalışıp çalışmadığı belirsiz |
 
 ## Faz 7 — Bağımlılıklar ve kurulum
 
-`requirements.txt` kontrollü yükseltme (her paket ayrı, analiz modülleriyle test), `download.sh`
-SHA-256 doğrulaması, `apt-key` → `signed-by`, chromedriver 2.38 kaldırılması, Docker tabanının
-`ubuntu:24.04`'e taşınması.
+Karar gerektirmeyen kısım uygulandı (kod + birim test; `install.sh` ve `core/Dockerfile` **çalıştırılmadı/derlenmedi**):
+
+| Adım | Durum |
+|---|---|
+| 7.1 `delete.sh` psql parolası (`PGPASSWORD`), scraper `pipelines.py` parolası | TAMAM (S13) |
+| 7.2 `install.sh`: kendi dizinine `cd`, binwalk alt kabukta ve yalnızca bu çalıştırmada indirildiyse temizlenir, PostgreSQL yeniden başlatması yapılandırma düzenlemelerinden sonra (+ `systemctl start docker`), `groupadd` korumalı, `tee --append` idempotent, PEP 668 algılayıp açıklamayla `exit 1` | TAMAM (kod, statik test; gerçek kurulum koşulmadı). `set -e`/`set -u` bilerek eklenmedi |
+| 7.3 `analyses/initializer.py`: `--no-sandbox` yalnızca root veya `FIRMAE_CHROME_NO_SANDBOX=1` | TAMAM; S11 **açık** (hat root çalışıyor) |
+| 7.4 `requirements.txt`: `pytest` çıkarıldı, kullanım yerine göre başlıklar; başka paket değişmedi | TAMAM |
+| 7.5 `core/Dockerfile`: `apt-key` → `signed-by` keyring + `gnupg`, `chmod 755 /usr/bin/sudo` | TAMAM (kod; docker build çalıştırılmadı) |
+| 7.6 `download.sh` doğrulama mekanizması + `binaries.sha256` (`FIRMAE_VERIFY_DOWNLOADS=warn\|strict`) | TAMAM (mekanizma); **hash'ler `UNKNOWN`** |
+
+Karar/onay bekleyenler (Faz 6.4/6.5 de ayrıca onay bekler):
+- `binaries.sha256` hash'lerini doldurmak (indirme gerekir) ve ardından varsayılanı `strict` yapmak; `install.sh`'in üç indirmesi (binwalk arşivi, Chrome `.deb`, chromedriver) için de aynısı.
+- PEP 668: venv mi `--break-system-packages` mı (`install.sh` şimdilik durup soruyor). `sasquatch` + GCC 13 sorunu (Ubuntu 24.04) çözülmedi.
+- `requirements.txt` kontrollü yükseltme (her paket ayrı, analiz modülleriyle test) ve S16.
+- chromedriver 2.38'in kaldırılması (Selenium Manager'a geçiş).
+- Docker tabanının `ubuntu:24.04`'e taşınması.
+- S11: Chrome'u root olmayan kullanıcıyla çalıştırmak.
 
 ## Kapsam dışı (bilinçli)
 
