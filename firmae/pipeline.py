@@ -14,7 +14,9 @@ released.
 
 import fcntl
 import hashlib
+import json
 import os
+import stat
 import subprocess
 import time
 
@@ -42,6 +44,22 @@ NETWORK_BASE_TIMEOUT = 900
 NETWORK_PER_INIT_MARGIN = 300
 STAGE_GRACE = 60            # SIGKILL this long after SIGINT: makeNetwork's cleanup trap needs time
 
+# Hardware profile (firmae/hwprofile.py): informational only, never decides the
+# outcome of a run. FIRMAE_HWPROFILE=0 switches it off; FIRMAE_TIMEOUT_HWPROFILE
+# overrides the limit (0: none).
+HWPROFILE_TIMEOUT = 300
+HWPROFILE_GRACE = 10        # SIGKILL this long after SIGINT
+HWPROFILE_JSON = "hw_profile.json"
+HWPROFILE_LOG = "hwprofile.log"
+HW_SERIAL_LOGS = ("qemu.initial.serial.log", "qemu.final.serial.log")
+HWPROFILE_INNER_DEFAULT = 240   # --timeout of the CLI when the outer limit is "none"
+HW_SUMMARY_MAX_BYTES = 8 << 20  # the CLI limits the profile to 2 MiB; this is only a read guard
+# The summary line prints only these keys and values: the profile is written by
+# a tool that read untrusted firmware, so nothing else from it reaches the terminal.
+HW_KINDS = ("gpio", "watchdog", "nvram", "i2c", "spi", "led", "mtd", "uart", "wlan", "other")
+HW_STATUSES = ("not-referenced", "referenced", "failing", "covered", "unsupported")
+HW_LOUD = ("unsupported", "failing")
+
 LOCK_NAME = ".firmae.lock"  # in scratch/<IID>/; flock'ed while an image is processed
 # scratch/.locks/<md5 of the firmware>.lock: flock'ed before the first stage.
 # The image id is only known after `extractor.py -nk` (which already writes
@@ -64,11 +82,19 @@ def firmware_digest(path):
     return h.hexdigest()
 
 
+MAX_STAGE_TIMEOUT = 7 * 24 * 3600   # upper bound of FIRMAE_TIMEOUT_* (seconds)
+
+
 def stage_timeout(stage, default):
-    """default, or FIRMAE_TIMEOUT_<STAGE> when set to a non-negative integer (0: none)."""
+    """default, or FIRMAE_TIMEOUT_<STAGE> when set to a non-negative integer (0: none).
+    Anything else (also a number with more than 12 significant digits, which
+    int() may refuse) is "not set"; larger values than a week are cut to a week."""
     value = os.environ.get("FIRMAE_TIMEOUT_%s" % stage.upper(), "").strip()
     if value.isascii() and value.isdigit():
-        return int(value) or None
+        digits = value.lstrip("0")
+        if len(digits) > 12:
+            return default
+        return min(int(digits or "0"), MAX_STAGE_TIMEOUT) or None
     return default
 
 
@@ -82,6 +108,9 @@ class Pipeline:
         self.state = None
         self._lock_fd = None             # scratch/<IID>/.firmae.lock
         self._fw_lock_fd = None          # scratch/.locks/<md5>.lock
+        self._hw_ran = False             # the profile was (re)written in this run
+        self._hw_static_ok = False       # the static step of this run exited 0
+        self._hw_dyn_pending = False     # the network step failed: dynamic step after the release
 
     # ------------------------------------------------------------------ helpers
 
@@ -223,27 +252,162 @@ class Pipeline:
             self._show_tail(logpath)
             raise FirmAEError(stage, code, "%s failed with exit %d" % (os.path.basename(argv[0]), rc))
 
+    # ------------------------------------------------------- hardware profile
+
+    @staticmethod
+    def _hwprofile_enabled():
+        return os.environ.get("FIRMAE_HWPROFILE", "").strip() != "0"
+
+    def _hwprofile_step(self, stage, head_args, tail_args=(), append=False):
+        """Run `python3 -m firmae.hwprofile` for scratch/<IID>/hw_profile.json,
+        output in scratch/<IID>/hwprofile.log. Informational: a failure, a
+        timeout or a missing module is reported as one line and never raised.
+        Only Exception is caught -- KeyboardInterrupt and SystemExit (SIGTERM)
+        pass through, and run_with_timeout stops the process group first."""
+        limit = stage_timeout("hwprofile", HWPROFILE_TIMEOUT)
+        argv = ["python3", "-m", "firmae.hwprofile"] + head_args
+        argv += ["--out", self.state.path(HWPROFILE_JSON)] + list(tail_args)
+        # the CLI's own budget is 80% of the outer limit, so it can still write a
+        # partial profile before it is stopped; no outer limit: never unbounded
+        inner = max(1, limit * 8 // 10) if limit is not None else HWPROFILE_INNER_DEFAULT
+        argv += ["--timeout", str(inner)]
+        self.say.debug("%s: %s -> %s" % (stage, " ".join(argv), HWPROFILE_LOG))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_APPEND if append else os.O_TRUNC)
+        try:
+            with os.fdopen(os.open(self.state.path(HWPROFILE_LOG), flags, 0o644), "w") as log:
+                rc, timed_out = run_with_timeout(argv, limit, grace=HWPROFILE_GRACE, cwd=self.cfg.root,
+                                                 env=self.cfg.env(), stdout=log, stderr=subprocess.STDOUT)
+        except Exception as e:
+            self.say.info("hardware profile (%s) not done: %s (continuing; see %s)" %
+                          (stage, e, HWPROFILE_LOG), stage)
+            return False
+        if timed_out:
+            self.say.info("hardware profile (%s) timed out after %ds (continuing; see %s)" %
+                          (stage, limit, HWPROFILE_LOG), stage)
+            return False
+        if rc != 0:
+            self.say.info("hardware profile (%s) failed with exit %d (continuing; see %s)" %
+                          (stage, rc, HWPROFILE_LOG), stage)
+            return False
+        return True
+
+    def _hwprofile_static(self, tarball):
+        if not self._hwprofile_enabled():
+            return
+        # A profile of an earlier run must not pass for this run's: remove it
+        # (the file or symlink itself, never what it points to) before the
+        # static step; if that step fails there is nothing to update or summarise.
+        path = self.state.path(HWPROFILE_JSON)
+        try:
+            mode = os.lstat(path).st_mode
+            if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+                os.unlink(path)
+        except OSError:
+            pass
+        self._hw_static_ok = self._hwprofile_step("hwprofile", ["--tar", tarball])
+        self._hw_ran = self._hw_static_ok
+
+    def _hwprofile_dynamic(self):
+        if not self._hwprofile_enabled() or not self._hw_static_ok:
+            return
+        logs = [self.state.path(n) for n in HW_SERIAL_LOGS if os.path.isfile(self.state.path(n))]
+        if not logs:
+            self.say.debug("hwprofile-dynamic: no serial log, skipped")
+            return
+        if not os.path.isfile(self.state.path(HWPROFILE_JSON)):
+            self.say.debug("hwprofile-dynamic: no static profile to update, skipped")
+            return
+        serial = []
+        for path in logs:
+            serial += ["--serial-log", path]
+        self._hwprofile_step("hwprofile-dynamic", ["--update"], serial, append=True)
+
+    def _hw_summary(self):
+        """One line for the user from the profile, if this run wrote one. Never raises."""
+        if not self._hw_ran or self.state is None:
+            return
+        try:
+            line = self._hw_summary_line()
+        except Exception:
+            line = None
+        if line:
+            self.say.plain(line)
+
+    def _hw_summary_line(self):
+        path = self.state.path(HWPROFILE_JSON)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            return None
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return None
+            raw = f.read(HW_SUMMARY_MAX_BYTES + 1)
+        shown = os.path.relpath(path, self.cfg.root)
+        if shown.startswith(os.pardir):
+            shown = path
+        # fixed text: nothing from the file reaches the terminal
+        unreadable = "[hw] profil okunamadı (%s)" % shown
+        if len(raw) > HW_SUMMARY_MAX_BYTES:
+            return unreadable
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):      # UnicodeDecodeError is a ValueError
+            return unreadable
+        periph = data.get("peripherals") if isinstance(data, dict) else None
+        if not isinstance(periph, dict):
+            return unreadable
+        found = []
+        for kind in HW_KINDS:
+            entry = periph.get(kind)
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if isinstance(status, str) and status in HW_STATUSES:
+                found.append((kind, status))
+        if not found:
+            return None
+        found.sort(key=lambda ks: ks[1] not in HW_LOUD)          # stable: loud ones first
+        return "[hw] %s (%s)" % (" ".join("%s=%s" % ks for ks in found), shown)
+
     # ------------------------------------------------------------------- run
 
     def run_firmware(self, infile):
         """Process one firmware file. Returns an ExitCode; never raises FirmAEError."""
         self.iid = None
         self.state = None
+        self._hw_ran = False
+        self._hw_static_ok = False
+        self._hw_dyn_pending = False
+        failed = False
         try:
-            return self._run(infile)
+            code = self._run(infile)
+            self._hw_summary()
+            return code
         except FirmAEError as e:
+            failed = True
             self.say.error(e.message, e.stage)
             if e.result_text is not None and self.state is not None:
                 self.state.write("result", e.result_text)
+            if not self._hw_dyn_pending:
+                self._hw_summary()           # else: in `finally`, after the dynamic step
             return e.code
         finally:
             # Only with the lock held: without it the image's QEMU, mount, loop
             # devices and TAPs may belong to another run that is still using them.
-            if self.iid is not None and self._lock_fd is not None:
-                # QEMU, mount, loop devices, TAP/VLAN, /tmp sockets of this image only
-                self._bash_fn("release_emulation", self.iid)
-            self._release_lock()         # after the release: nobody may start on half-freed resources
-            self.say.close()
+            try:
+                if self.iid is not None and self._lock_fd is not None:
+                    # QEMU, mount, loop devices, TAP/VLAN, /tmp sockets of this image only
+                    self._bash_fn("release_emulation", self.iid)
+                    # The network step failed: its serial logs are the best evidence of
+                    # what the firmware wanted. Run the dynamic step now -- after the
+                    # release (QEMU is gone, the logs are final; release_emulation does
+                    # not delete them), still under the image lock. Only on a FirmAEError:
+                    # on Ctrl-C/SIGTERM nothing extra is done.
+                    if failed and self._hw_dyn_pending:
+                        self._hwprofile_dynamic()
+                        self._hw_summary()
+            finally:
+                self._release_lock()     # after the release: nobody may start on half-freed resources
+                self.say.close()
 
     def _run(self, infile):
         cfg, say = self.cfg, self.say
@@ -364,6 +528,7 @@ class Pipeline:
 
         # -------- QEMU image + network inference
         if not st.flag("web"):
+            self._hwprofile_static(tarball)         # informational; before the image is built
             t = time.time()
             self._step("tar2db", ["python3", "-u", "./scripts/tar2db.py", "-i", iid, "-f",
                                   "./images/%s.tar.gz" % iid, "-h", cfg.PSQL_IP],
@@ -377,6 +542,7 @@ class Pipeline:
 
             t = time.time()
             say.info("infer network start!!!", "network")
+            self._hw_dyn_pending = True
             self._step("network", ["python3", "-u", "./scripts/makeNetwork.py", "-i", iid, "-q",
                                    "-o", "-a", arch],
                        "makeNetwork.log", ExitCode.NETWORK, timeout=self._network_timeout())
@@ -386,6 +552,8 @@ class Pipeline:
                 except FileExistsError:
                     pass
             st.write_time("network", time.time() - t)
+            self._hw_dyn_pending = False
+            self._hwprofile_dynamic()              # informational; serial logs of the emulation
         else:
             say.info("%s already succeed emulation!!!" % infile, "network")
 

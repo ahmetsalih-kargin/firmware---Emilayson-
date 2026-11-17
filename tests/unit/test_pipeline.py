@@ -66,6 +66,9 @@ def project(repo_root, tmp_path, monkeypatch):
         p.write_text(body % {"iid": IID} if "%(iid)s" in body else body)
         p.chmod(0o755)
     monkeypatch.delenv("FIRMAE_DOCKER", raising=False)
+    # the hardware profile steps are tested in test_pipeline_hwprofile.py; here they
+    # would only start a python3 that cannot import firmae.hwprofile (no such module in the stub tree)
+    monkeypatch.setenv("FIRMAE_HWPROFILE", "0")
     monkeypatch.setenv("PROJECT", str(root))
     monkeypatch.setenv("STUB_IID", IID)
     return root
