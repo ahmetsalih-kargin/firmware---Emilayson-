@@ -792,3 +792,33 @@ Bu bölümdeki her şey **ölçülmüştür**; ölçülmeyenler "Hâlâ doğrula
 - DHCP/user-net modu **gerçek firmware ile** (iki örnek de tetiklemiyor).
 - `analyze` / `debug` / `run` / `boot` modları.
 - H'nin çıkış kodu ayrıca yakalanmadı.
+
+## Faz 4.3 / 4.4 / 4.5 — grup 2 (2026-11-17)
+
+Kod: `firmae/image.py` (makeImage), `scratch/<IID>/emulation.conf` + statik `scripts/emulate.sh` (son emülasyon), `firmae/check.py` + `procutil.py` + `hostfwd.py` (emülasyon denetimi). Kapsam asgaridir (tam Python başlatıcı ve yerel loop/mount/`tarfile` yok). Ölçülenler ile ölçülmeyenler ayrıdır.
+
+### A) Ölçülenler
+
+- **Tam birim takımı:** **1473 geçti**, 306 sn (WSL2 Ubuntu, Python 3.12).
+- **Gerçek emülasyon** (sonuç dizini `/home/ahmet/firmae-phase0/results/20261117-183143`; TAP modu):
+  - **A (ARM, DIR-868L):** çıkış 0, 418 sn (grup 1: 422 sn). **B (MIPS, WNAP320):** çıkış 0, 386 sn (384 sn). **G (C'den sonra yeniden koşu):** çıkış 0, 402 sn (404 sn).
+  - **C** (başlangıç emülasyonunda Ctrl-C): çıkış 130. **H** (son emülasyonda Ctrl-C): çıkış 130. Çıkış kodları ilk kez yakalandı.
+  - Bitiş sayaçları hep 0; C ve H'den +5 sn ve +30 sn sonra da 0.
+  - A ve B sonuç dosyaları grup 1 ile aynı.
+  - `scratch/1/run.sh` `tests/fixtures/generated/run_sh_wrapper.expected` ile bayt bayt aynı; `emulation.conf` iki altınla (`emulation_armel_dir868l.expected`, `emulation_mipseb_wnap320.expected`) bayt bayt aynı.
+  - Son QEMU'nun ebeveyni `emulate.sh`'dir (araya süreç girmez). `check.py` süreç olarak çalışır; artık bir `check_emulation.sh` bash'i kalmıyor.
+  - `makeImage` sonrasında chroot/tar/mkfs/fdisk artığı yok. B'de `fdisk` kısa süre (3 sn) D durumunda göründü, takılma olmadı.
+  - `hw_profile.json` değişmedi. Tepe bellek 1234 MB.
+- **Bağımsız denetim (Opus):** grup 2'de kritik/yüksek bulgu yok; bir orta (önceden var olan, B1: misafir IPv4 sınıf süzmesi) ve düşük bulgular düzeltildi. 19 mutasyonun 15'i düzeltmelerden önce yakalandı; kalan 4'ün her biri için artık test var.
+
+### B) Ölçülmeyenler
+
+- DHCP modu gerçek firmware ile.
+- `analyze` / `debug` / `run` / `boot` modları ve Docker modu.
+- Python 3.8 çalışma zamanı (yalnızca sözdizimi).
+- Boru hattı zaman aşımı temizliğinin uçtan uca davranışı.
+- Son QEMU argv'si eski altınla yalnızca gözle karşılaştırıldı (otomatik bayt karşılaştırması yok).
+
+### C) Ortam notu
+
+Harness eşitlemesi bir kez sessizce başarısız oldu: `~/FirmAE` içindeki root sahipli `__pycache__` yüzünden dosyalar kopyalanamadı. Ölçüm düzeneği kopyasında düzeltildi; bayat ağaçta yapılan ilk takım koşusu **atıldı**.

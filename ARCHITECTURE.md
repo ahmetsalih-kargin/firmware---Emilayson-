@@ -15,8 +15,11 @@
 >   `signals.py`, `storage.py`, `qemu.py`, `network.py`, `metrics.py`, `hwprofile.py`,
 >   `stages/*`; `QemuSpec` tek QEMU oluşturucu; `-pidfile`; `FIRMAE_MAX_PARALLEL` / slot
 >   kilitleri; `systemd-run` kaynak sınırları; `ip netns` yalıtımı; peripheral emülasyonu
->   (§9); `tests/integration/`. Üretilen `scratch/<IID>/run.sh` hâlâ tam bir Bash
->   şablonudur (`makeNetwork.py` üretir), tek satırlık Python çağrısı değil.
+>   (§9); `tests/integration/`. Faz 4.3–4.5 asgari kapsamda uygulandı: `firmae/image.py`
+>   (makeImage host tarafı), `firmae/check.py` + `procutil.py` + `hostfwd.py`
+>   (emülasyon denetimi), `scratch/<IID>/emulation.conf` + statik `scripts/emulate.sh`
+>   (üretilen `run.sh` sabit sarmalayıcıdır; Bash kodu üretilmez). Tam Python başlatıcı
+>   ve yerel loop/mount/`tarfile` yapılmadı.
 > - Güvenlik ve test durumu: `SECURITY.md`, `TEST_REPORT.md`, `CHANGELOG.md`.
 >
 > Kararlar: tek kullanıcılı lab makinesi tehdit modeli, WSL2 (Ubuntu 24.04) test ortamı,
@@ -30,10 +33,11 @@
 run.sh ──source──> firmae.config  (ayarlar + 29 Bash fonksiyonu)
   ├─ sources/extractor/extractor.py   rootfs/kernel çıkarımı (binwalk, root)
   ├─ scripts/util.py, getArch.py, inferKernel.py, tar2db.py
-  ├─ scripts/makeImage.sh             raw disk + losetup + mount + chroot yamaları
-  ├─ scripts/makeNetwork.py           ön emülasyon → log parse → scratch/IID/run.sh ÜRETİR
-  │     └─ scripts/run.<arch>.sh      ön emülasyon QEMU'su (3 kopya)
-  │     └─ scripts/check_emulation.sh scratch/IID/run.sh & → ping/curl → ps|grep|kill
+  ├─ scripts/makeImage.sh             ince sarmalayıcı → firmae/image.py (raw disk + losetup + mount + chroot yamaları; aynı dış araçlar)
+  ├─ scripts/makeNetwork.py           ön emülasyon → log parse → scratch/IID/emulation.conf + sabit run.sh YAZAR
+  │     └─ scripts/run.<arch>.sh      ön emülasyon QEMU'su (ince sarmalayıcı → firmae/qemu.py)
+  │     └─ scripts/emulate.sh         scratch/IID/run.sh'nin exec ettiği statik betik (emulation.conf'u okur)
+  │     └─ scripts/check_emulation.sh ince sarmalayıcı → firmae/check.py: scratch/IID/run.sh & → ping/curl → sonlandırma
   └─ analyses/analyses_all.sh         initializer, nmap, fuzzer, routersploit
 ```
 
@@ -99,9 +103,9 @@ FirmAE/
 │   └── stages/
 │       ├── extract.py        # extractor.py çağrısı + IID
 │       ├── arch.py           # getArch mantığı (güvenli tar okuma)
-│       ├── image.py          # makeImage.sh'in host tarafı
+│       ├── image.py          # makeImage.sh'in host tarafı (4.3: asgari kapsamda firmae/image.py olarak uygulandı)
 │       ├── infer_network.py  # makeNetwork.py (saf parse fonksiyonları korunur)
-│       ├── check.py          # check_emulation.sh
+│       ├── check.py          # check_emulation.sh (4.5: firmae/check.py olarak uygulandı)
 │       └── modes.py          # run / check / analyze / debug / boot
 ├── scripts/                  # guest/chroot script'leri burada KALIR; host script'leri
 │                             # geçiş süresince sarmalayıcı olarak korunur
@@ -262,7 +266,7 @@ değişikliği**, bkz. `REFACTORING_PLAN.md`).
 
 ## 8. QEMU ve ağ mimarisi
 
-> **Gerçek durum (Faz 4.2, 2026-11-17):** `firmae/qemu.py` vardır ama `QemuSpec` yoktur: yalnızca **ilk (ön) emülasyonu** (`build_initial_argv`, `main`; `python3 -I <kurulum>/firmae/qemu.py initial <arch> <IID> <QEMU_INIT>`) ve ortak yardımcıları (arch tabloları, kernel yolu, çekirdek komut satırı, soket tabanı) içerir; `scripts/run.<arch>.sh` üçü ince sarmalayıcıdır (kurulum kökü betiğin ağacından bulunur; `-I` ile cwd ve `PYTHON*` değişkenleri modül arama yoluna girmez, `qemu.py` kurulum kökünü `sys.path`'in SONUNA ekler, yani kullanıcı `PYTHONPATH` ile `firmae`'yi yönlendiremez; `exec python3 -I ...`, sonra `os.execvpe` ile QEMU süreci yerine geçer; arada kabuk/Python süreci kalmaz). **Son emülasyonun şablonu hâlâ `makeNetwork.py` içinde Bash olarak üretilir**; QEMU komutu iki yerde (qemu.py ve makeNetwork.py) üretilir. Altın argv testi ve gerçek QEMU durumu: `TEST_REPORT.md`. Tablonun "Mevcut" sütunu `master`'ı gösterir. `refactor/hardening`'de uygulananlar: soketler `scratch/IID/run/` altında (0700), `restrict=on`, `hostfwd` ve yer tutucu NIC'ler 127.0.0.1'de, TAP modunda iptables/ip6tables kuralları (netns yerine). Dinamik `hostfwd` host portları da uygulandı (kod + birim test, DHCP gerçek koşusu yok). Uygulanmayanlar: `ip tuntap` (üretilen `run.sh` hâlâ `tunctl` kullanır), `ip netns`. DHCP modu gerçek çalıştırmayla doğrulanmadı.
+> **Gerçek durum (Faz 4.2, 2026-11-17):** `firmae/qemu.py` vardır ama `QemuSpec` yoktur: yalnızca **ilk (ön) emülasyonu** (`build_initial_argv`, `main`; `python3 -I <kurulum>/firmae/qemu.py initial <arch> <IID> <QEMU_INIT>`) ve ortak yardımcıları (arch tabloları, kernel yolu, çekirdek komut satırı, soket tabanı) içerir; `scripts/run.<arch>.sh` üçü ince sarmalayıcıdır (kurulum kökü betiğin ağacından bulunur; `-I` ile cwd ve `PYTHON*` değişkenleri modül arama yoluna girmez, `qemu.py` kurulum kökünü `sys.path`'in SONUNA ekler, yani kullanıcı `PYTHONPATH` ile `firmae`'yi yönlendiremez; `exec python3 -I ...`, sonra `os.execvpe` ile QEMU süreci yerine geçer; arada kabuk/Python süreci kalmaz). **Son emülasyon (4.4) artık Bash üretmez: `makeNetwork.py` `emulation.conf` yazar, statik `scripts/emulate.sh` okuyup QEMU'yu çalıştırır**; QEMU komutu hâlâ iki yerde kurulur (ön emülasyon için `qemu.py`, son emülasyon için `emulate.sh`). Altın argv testi ve gerçek QEMU durumu: `TEST_REPORT.md`. Tablonun "Mevcut" sütunu `master`'ı gösterir. `refactor/hardening`'de uygulananlar: soketler `scratch/IID/run/` altında (0700), `restrict=on`, `hostfwd` ve yer tutucu NIC'ler 127.0.0.1'de, TAP modunda iptables/ip6tables kuralları (netns yerine). Dinamik `hostfwd` host portları da uygulandı (kod + birim test, DHCP gerçek koşusu yok). Uygulanmayanlar: `ip tuntap` (üretilen `run.sh` hâlâ `tunctl` kullanır), `ip netns`. DHCP modu gerçek çalıştırmayla doğrulanmadı.
 
 `qemu.py` tek bir `QemuSpec` → `argv` dönüştürücüsü sağlar; arch tabloları (makine, kernel,
 disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karşılığıdır.
@@ -276,12 +280,15 @@ disk, NIC modeli) `firmae.config`'teki `get_*` fonksiyonlarının birebir karş�
 | TAP | `sudo tunctl` | `ip tuntap` (iproute2), idempotent | uml-utilities bağımlılığı azalır |
 | İzolasyon (Faz 5) | yok | analiz başına `ip netns` | paralel analiz + host izolasyonu |
 
-> **Gerçek durum:** `scratch/IID/run.sh` hâlâ `makeNetwork.py`'nin ürettiği **tam Bash şablonudur** (QEMU komutu, TAP/mount/temizlik trap'i, 16 satırlık imaj dosyası denetim bloğu); tek satırlık Python çağrısı **uygulanmadı**.
+> **Gerçek durum (Faz 4.3–4.5, asgari kapsam, 2026-11-17 gerçek emülasyonla ölçüldü):**
+>
+> - **`run.sh` ve `emulation.conf` (4.4).** `makeNetwork.py` artık Bash üretmez. `scratch/<IID>/run.sh` sabit bir sarmalayıcıdır (bayt bayt `tests/fixtures/generated/run_sh_wrapper.expected`); statik `scripts/emulate.sh`'yi `exec` eder, yani emülasyonun pid'i `check_emulation`/`run_mode.sh`'nin başlattığı pid olarak kalır (araya süreç girmez). İmaja bağlı her şey `scratch/<IID>/emulation.conf` içindedir: `KEY=value` satırları `FORMAT`, `IID`, `ARCH`, `ENDIAN`, `NETWORK_TYPE`, `NET_BRIDGE`, `NET_INTERFACE`, `QEMU_INIT`, `GEN_FIRMAE_NET` ve tekrarlanabilen `NET=`, `NIC=`, `HOSTFWD=` kayıtları. Dosya seri logdan türeyen değerler taşıdığı ve betik root çalıştığı için **asla `source`/`eval` edilmez**: Python (yazarken ve okurken) ve Bash (`emulate.sh`) aynı katı dilbilgisiyle satırları açık karakter listeleriyle doğrular, değerler hep tırnaklı genişletilir; ayrıştırılamayan dosya hiçbir şeye dokunulmadan çıkış 1 ile durdurulur. `run.sh`/`emulation.conf` yazılırken symlink hedefleri reddedilir. Tam Python başlatıcı (seçenek B) **yapılmadı**.
+> - **`check_emulation` (4.5).** `scripts/check_emulation.sh` ince sarmalayıcıdır; süreç olarak `firmae/check.py` çalışır (artık arada bir `check_emulation.sh` bash'i kalmaz). Süreç yardımcıları `firmae/procutil.py`, DHCP web denetimi `firmae/hostfwd.py`. Bash `check_network`/`qemu_pids`/`hostfwd_check.sh` `run_mode.sh` için korunur; Python ile eşdeğerlik `tests/unit/test_check_py.py` ile sabitlenmiştir. Durum dosyaları `O_NOFOLLOW`/`O_EXCL` ile yazılır, başlangıçta eski `ping`/`time_ping`/`ip`/`web`/`time_web` silinir.
+> - **`makeImage` (4.3).** `scripts/makeImage.sh` ince sarmalayıcıdır; iş `firmae/image.py` içindedir ve aynı dış araçları (losetup, kpartx, mkfs, mount, tar, chroot) çağırır; yerel loop/mount/`tarfile` (seçenek B) **yapılmadı**. Her dış komut kendi **koruma süreç grubunda** (ek bir `/bin/sh` bekçisi; stdin `/dev/null`, `PR_SET_PDEATHSIG`) çalışır; ebeveyn SIGKILL ile ölürse chroot/tar çocukları yetim kalmaz. Temizlik bütçesi en çok **47 sn** (umount 10 sn, sonra `umount -l`, ...) ve boru hattının `STAGE_GRACE = 60` sn'sinin altında kalır (`test_cleanup_fits_in_the_pipeline_grace`). Host tarafı yazmalar (`init`, `service`, `/firmadyne/*`, `/bin/a`) `resolve_in_root` + `O_NOFOLLOW`/`O_EXCL` ile fd tabanlı yapılır.
 
 **Port keşfi (`findPorts`, Faz 2.10):** seri logdaki `inet_bind` satırları iki biçimde okunur: gerçek 4.1 çekirdek biçimi (`inet_bind[PID: n (ad)]: proto:SOCK_X, port:N`; adres loglanmaz, `0.0.0.0` varsayılır) ve eski biçim (`ip:port: 0x<adres>:<port>`). Port 0 (çekirdek seçer) ve >= 32768 (geçici/ephemeral aralık) atılır; (proto, port) çiftine göre tekrarlar elenir, ilk bind sırası korunur; en çok `MAX_PORTS=256`. `hostfwd` için ayrıca 80/443 çıkarılır ve en çok `MAX_FORWARD_PORTS=32` ek port iletilir.
 
-(Öneri, uygulanmadı) `scratch/IID/run.sh` **üretilmeye devam eder** (kullanıcılar elle çalıştırıyor), ancak
-içeriği tek satırlık bir çağrı olur: `exec python3 -m firmae emulate <IID> --mode "$(basename "$0")"`.
+(Kısmen uygulandı, bkz. yukarıdaki "Gerçek durum") `scratch/IID/run.sh` **üretilmeye devam eder** (kullanıcılar elle çalıştırıyor); içeriği artık sabit bir sarmalayıcıdır ve `scripts/emulate.sh`'yi çağırır. Öneri olarak kalan: tek satırlık `exec python3 -m firmae emulate <IID> --mode "$(basename "$0")"` çağrısı (tam Python başlatıcı).
 `run_debug.sh`, `run_analyze.sh`, `run_boot.sh` symlink'leri aynı kalır.
 
 ---
@@ -294,7 +301,7 @@ içeriği tek satırlık bir çağrı olur: `exec python3 -m firmae emulate <IID
 |---|---|---|
 | QEMU yerleşik | UART (malta 16550; virt PL011 — FirmAE kernel'inde `ttyS`, major 4 / minor 64 olarak kayıtlı), IDE/virtio disk, e1000/virtio NIC, RTC | QEMU, `FirmAE_kernel-v4.1/drivers/tty/serial/amba-pl011.c` |
 | Kernel `firmadyne` modülü (`devfs=1`) | 12 stub: `/dev/acos_nat_cli`, `brcmboard`, `dsl_cpe_api`, `gpio`, `nvram`, `pib`, `sc_led`, `tca0`, `ticfg`, `watchdog`, `wdt`, `zybtnio` — `open/write/ioctl` başarılı, `read` → `"0\0"` | `FirmAE_kernel-v4.1/drivers/firmadyne/devfs_stubs.c` (bu repoda değil) |
-| Kernel `nandsim` | MTD (boş NAND) | `nandsim.parts=...` kernel komut satırı, `scripts/makeNetwork.py` içindeki `run.sh` şablonu (~satır 300; eski "satır 85" referansı yanlıştı) |
+| Kernel `nandsim` | MTD (boş NAND) | `nandsim.parts=...` kernel komut satırı, `scripts/makeNetwork.py` (`qemuCmd`) ve `scripts/emulate.sh` (eski `run.sh` şablonu 4.4'te `emulate.sh`'ye taşındı) |
 | `libnvram` (LD_PRELOAD ile yüklenir) | NVRAM key/value. **libc `open`/`ioctl` çağrılarını YAKALAMAZ**: firmware'in kendi nvram API sembollerinin (`nvram_get`, `nvram_set`, ... ve `alias.c`'deki takma adlar) yerine geçer. Bu yüzden `/dev/nvram` açmaya çalışan bir ikili bu kütüphaneden etkilenmez | `sources/libnvram/nvram.c`, `alias.c` |
 | Dosya tabanlı düğümler | `/dev/gpio/in`, `/dev/mtd*` düğümleri | `scripts/fixImage.sh` |
 | **Yok** | I2C (`/dev/i2c-*`), SPI (`/dev/spidev*`), `gpiochip` (karakter cihaz API), vendor'a özgü diğer düğümler | — |

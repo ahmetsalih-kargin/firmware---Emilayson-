@@ -6,6 +6,42 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Phase 4.3 / 4.4 / 4.5 — `firmae/image.py`, `emulation.conf`, `firmae/check.py` (2026-11-17, "group 2")
+
+Measured on real emulation (WSL2, DIR-868L armel and WNAP320 mipseb, TAP mode; see `TEST_REPORT.md` "Grup 2"). The DHCP
+mode with a real firmware, analyze/debug/run/boot, Docker mode and a Python 3.8 runtime are **not** verified.
+Scope is deliberately minimal (user decision): no full Python launcher, no native loop/mount/`tarfile`.
+
+- **4.5 `check_emulation` in Python.** `scripts/check_emulation.sh` is a thin wrapper; `firmae/check.py` (with
+  `firmae/procutil.py` and `firmae/hostfwd.py`) is the process. The Bash `check_network`, `qemu_pids` and
+  `scripts/hostfwd_check.sh` stay for `run_mode.sh`; equivalence is pinned by `tests/unit/test_check_py.py`.
+  Fixes: the signal race (audit B4); state files are written with `O_NOFOLLOW`/`O_EXCL`.
+- **4.4 data instead of generated Bash.** `makeNetwork.py` writes a validated `scratch/<IID>/emulation.conf`;
+  `scratch/<IID>/run.sh` is a fixed wrapper that `exec`s the static `scripts/emulate.sh` (the QEMU parent is
+  `emulate.sh`, no extra process). The file is never sourced or eval'd; the grammar is strict in Python and Bash.
+  The `scratch/<IID>/run.sh` and `emulation.conf` write refuses symlink targets. `util/compare.py` knows `emulation.conf`.
+- **4.3 `makeImage` in Python.** `scripts/makeImage.sh` is a thin wrapper; `firmae/image.py` calls the same external
+  tools. Host-side writes no longer follow symlinks planted by the guest (`SECURITY.md` S27). Orphaned chroot/tar
+  children on SIGKILL are fixed (guard process group + `PR_SET_PDEATHSIG`, cleanup budget 47 s < `STAGE_GRACE` 60 s).
+- **Guest IPv4 class filtering (audit B1, existed before).** Loopback, 0/8, multicast, link-local, reserved and
+  255.255.255.255 are rejected in `makeNetwork.py`, `emulate.sh` and `check.py`; a guest IP equal to the host TAP IP is
+  dropped; `check.py` skips addresses assigned locally on the host (bind test; disabled with a warning when
+  `net.ipv4.ip_nonlocal_bind=1`).
+- **Behaviour changes.**
+  - `check_emulation`: stale `ping`/`time_ping`/`ip`/`web`/`time_web` are removed at the start; `ip.N` must be a valid,
+    usable IPv4 address; `isDhcp` counts only when it is exactly `true`; a firmware whose only addresses are in the
+    rejected classes gets no TAP probe.
+  - `makeNetwork.py`: colliding multi-network layouts drop the colliding entry.
+  - `makeImage`: an invalid architecture fails at the start; an existing directory at a copy target is an error; an
+    existing `ttyS1` is replaced; `init`/`service` are copied with mode 0644, a 1 MiB limit and without following
+    symlinks; per-step timeouts (tar/chroot 1800 s); cleanup runs `umount` for 10 s, then `umount -l`; children get
+    stdin `/dev/null`; every command has one extra `/bin/sh` guard process.
+  - `emulate.sh` quotes all paths and validates its input (invalid input: exit 1, no side effects).
+  - The dead `get_kernel … true|false` branch was removed; the wrappers (`run.<arch>.sh`) are CDPATH-safe.
+- **Still open.** Root `run.sh` and `firmae.config:24` use the `cd "$(dirname…)"` pattern that an exported `CDPATH`
+  affects; chroot steps (`fixImage.sh` may run firmware binaries through `PATH`) remain a chroot-escape risk; the
+  `add_partition` window is covered only by `release_emulation` (`losetup -j`, no `dmsetup remove`).
+
 ### Phase 2.10 / 5.1 / 4.2 — port discovery, DHCP host ports, `firmae.qemu` (2026-11-17)
 
 Uncommitted working-tree changes ("group 1"). Verified by unit tests only; the DHCP mode and the
