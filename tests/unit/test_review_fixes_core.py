@@ -1,6 +1,7 @@
-"""Fixes from the independent review (core): scripts/check_emulation.sh limits
-the guest-supplied address count, secure_workdir refuses a symlinked work
-directory. System commands are stubs; nothing is emulated or signalled."""
+"""Fixes from the independent review (core): the emulation check
+(scripts/check_emulation.sh -> firmae/check.py) limits the guest-supplied
+address count, secure_workdir refuses a symlinked work directory. System
+commands are stubs; nothing is emulated or signalled."""
 
 import os
 import shutil
@@ -17,12 +18,33 @@ def stub(d, name, body):
     p.chmod(0o755)
 
 
+class FakeClock:
+    """firmae.check.Clock without waiting: whole seconds advance 10 s per
+    reading (as the old `date` stub did), sleep does not wait."""
+
+    def __init__(self):
+        self.t = 0
+
+    def now(self):
+        n = self.t
+        self.t += 10
+        return n
+
+    def precise(self):
+        return 0.0
+
+    def sleep(self, seconds):
+        pass
+
+
 @pytest.fixture
-def check_world(repo_root, tmp_path):
+def check_world(repo_root, tmp_path, monkeypatch, capsys):
+    """firmae.check (scripts/check_emulation.sh since REFACTORING_PLAN 4.5) in
+    this process with a fake clock; curl and ping are stubs."""
+    from firmae import check
     root = tmp_path / "FirmAE"
-    (root / "scripts").mkdir(parents=True)
+    root.mkdir()
     shutil.copy(repo_root / "firmae.config", root)
-    shutil.copy(repo_root / "scripts" / "check_emulation.sh", root / "scripts")
     work = root / "scratch" / "5"
     work.mkdir(parents=True)
     (work / "run.sh").write_text("#!/bin/bash\nexit 0\n")
@@ -32,13 +54,8 @@ def check_world(repo_root, tmp_path):
     log = tmp_path / "net_log"
     stub(bindir, "curl", 'echo "curl $*" >> %s; exit 7' % log)
     stub(bindir, "ping", 'echo "ping $*" >> %s; exit 1' % log)
-    stub(bindir, "sleep", "exit 0")
-    clock = tmp_path / "clock"                 # `date +%s` advances 10 s per call
-    clock.write_text("0")
-    stub(bindir, "date", 'if [ "$1" = "+%%s" ]; then n=$(cat %s); echo $n; echo $((n+10)) > %s; '
-                         'else echo 0.0; fi' % (clock, clock))
-    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]))
-    env.pop("FIRMAE_DOCKER", None)
+    monkeypatch.setenv("PATH", "%s:%s" % (bindir, os.environ["PATH"]))
+    monkeypatch.delenv("FIRMAE_DOCKER", raising=False)
 
     def run(ip_num, n_files):
         (work / "ip_num").write_text(ip_num + "\n")
@@ -46,8 +63,10 @@ def check_world(repo_root, tmp_path):
             (work / ("ip.%d" % i)).write_text("10.0.%d.%d\n" % (i // 250, i % 250 + 1))
         if log.exists():
             log.unlink()
-        res = subprocess.run(["bash", "./scripts/check_emulation.sh", "5", "mipsel"], cwd=root, env=env,
-                             capture_output=True, text=True, timeout=120)
+        capsys.readouterr()
+        rc = check.main(["./scripts/check_emulation.sh", "5", "mipsel"], root=str(root), clock=FakeClock())
+        out, err = capsys.readouterr()
+        res = subprocess.CompletedProcess([], rc, out, err)
         probed = sorted({l.split()[-1] for l in log.read_text().splitlines() if l.startswith("ping ")}) \
             if log.exists() else []
         return res, probed

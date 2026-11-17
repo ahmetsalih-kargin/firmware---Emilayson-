@@ -13,7 +13,10 @@ VALID_ARCHS = ("armel", "mipseb", "mipsel")
 
 _VARS = ("FIRMAE_BOOT", "FIRMAE_NET", "FIRMAE_NVRAM", "FIRMAE_KERNEL", "FIRMAE_ETC",
          "TIMEOUT", "CHECK_TIMEOUT", "PSQL_IP", "FIRMAE_DIR", "SCRATCH_DIR",
-         "TARBALL_DIR", "SCRIPT_DIR")
+         "TARBALL_DIR", "SCRIPT_DIR", "CHECK_MAX_IPS")
+
+# used when firmae.config does not set it (older copies)
+DEFAULT_CHECK_MAX_IPS = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -31,6 +34,8 @@ class Config:
     SCRATCH_DIR: str
     TARBALL_DIR: str
     SCRIPT_DIR: str
+    # at most this many guest addresses are probed (check_network in firmae.config)
+    CHECK_MAX_IPS: int = DEFAULT_CHECK_MAX_IPS
 
     def scratch(self, iid):
         return os.path.join(self.SCRATCH_DIR, str(iid))
@@ -62,7 +67,9 @@ def load(root=None):
         raise FirmAEError("config", ExitCode.PRIVILEGE,
                           "cannot read firmae.config: %s" % res.stderr.decode(errors="replace").strip())
     values = dict(item.split("=", 1) for item in res.stdout.decode().split("\0") if item)
+    max_ips = values.pop("CHECK_MAX_IPS", "")
     return Config(root=root,
+                  CHECK_MAX_IPS=int(max_ips) if max_ips else DEFAULT_CHECK_MAX_IPS,
                   TIMEOUT=int(values.pop("TIMEOUT")),
                   CHECK_TIMEOUT=int(values.pop("CHECK_TIMEOUT")),
                   **values)

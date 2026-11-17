@@ -1,7 +1,8 @@
 #!/bin/bash
-# Web check of a user-network (DHCP mode) emulation, shared by
-# scripts/check_emulation.sh and scripts/run_mode.sh. Source it after
-# firmae.config (needs qemu_pids, CHECK_TIMEOUT).
+# Web check of a user-network (DHCP mode) emulation, used by
+# scripts/run_mode.sh. Source it after firmae.config (needs qemu_pids,
+# CHECK_TIMEOUT). firmae/hostfwd.py is its Python twin, used by check_emulation
+# (via firmae/check.py); equivalence is pinned by tests/unit/test_check_py.py.
 #
 # QEMU forwards the guest's ports to loopback ports that makeNetwork.py chose
 # and recorded in scratch/<IID>/hostfwd, one "<tcp|udp> <guest port> <host

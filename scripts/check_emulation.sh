@@ -1,101 +1,15 @@
 #!/bin/bash
-
-if [ $# -ne 2 ]; then
-    echo $0: Usage: ./check_emulation.sh [iid] [arch]
-    exit 1
-fi
-
-set -e
-set -u
-
-if [ -e ./firmae.config ]; then
-    source ./firmae.config
-elif [ -e ../firmae.config ]; then
-    source ../firmae.config
-else
-    echo "Error: Could not find 'firmae.config'!"
-    exit 1
-fi
-
-IID=${1}
-WORK_DIR=`get_scratch ${IID}`
-ARCH=${2}
-
-echo "===== Check inferred emulation start ====="
-echo "[*] Inferred network: terminating after ${TIMEOUT} secs..."
-${WORK_DIR}/run.sh > ${WORK_DIR}/emulation.log 2>&1 &
-RUN_PID=$!
-
-# Stop exactly this image's emulation and let run.sh finish its own cleanup
-# (network teardown) -- on the normal path below and when we are interrupted.
-finish () {
-    stop_qemu ${IID}
-    wait_for_exit ${RUN_PID} 30
-    # e.g. the check_network loop when we are interrupted while it runs
-    pkill -P $$ 2>/dev/null || true
-}
-trap 'finish; exit 130' INT
-trap 'finish; exit 143' TERM
-trap 'finish; exit 129' HUP
-
-sleep 10
-
-IPS=()
-DHCP=false
-HOSTFWD_HTTP=""
-HOSTFWD_HTTPS=""
-if (egrep -sq true ${WORK_DIR}/isDhcp); then
-  # User network (DHCP mode): probe only the forwarded host ports recorded in
-  # ${WORK_DIR}/hostfwd, and only while this image's QEMU owns them
-  # (scripts/hostfwd_check.sh). No unconditional ping=true any more.
-  DHCP=true
-  if ! source "$(dirname "${BASH_SOURCE[0]}")/hostfwd_check.sh"; then
-    echo "[!] scripts/hostfwd_check.sh not found: no web check (web=false)"
-  elif ! read_hostfwd "${WORK_DIR}/hostfwd"; then
-    echo "[!] ${WORK_DIR}/hostfwd is missing or invalid: no web check (web=false)"
-  fi
-else
-  # a missing/garbled ip_num must not end the script under `set -e` before
-  # finish() has stopped run.sh (no IP: check_network returns at once)
-  IP_NUM=`cat "${WORK_DIR}/ip_num" 2>/dev/null || true`
-  [[ "${IP_NUM}" =~ ^[0-9]+$ ]] || IP_NUM=0
-  # the count comes from the guest: no more than check_network probes; 10#
-  # because "08" is not octal, and a huge number is just "many"
-  if [ ${#IP_NUM} -gt 4 ] || [ $((10#${IP_NUM})) -gt ${CHECK_MAX_IPS} ]; then
-    IP_NUM=${CHECK_MAX_IPS}
-  fi
-  IP_NUM=$((10#${IP_NUM}))
-  for (( IDX=0; IDX<${IP_NUM}; IDX++ ))
-  do
-    IPS+=(`cat "${WORK_DIR}/ip.${IDX}" 2>/dev/null || true`)
-  done
-fi
-
-if ${DHCP}; then
-  echo "[*] Waiting web service... on 127.0.0.1 port(s) ${HOSTFWD_HTTP:--}/${HOSTFWD_HTTPS:--} (guest 80/443): terminating after ${CHECK_TIMEOUT} secs..."
-  if [ -n "${HOSTFWD_HTTP}${HOSTFWD_HTTPS}" ]; then
-    read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_hostfwd "${IID}" "${HOSTFWD_HTTP}" "${HOSTFWD_HTTPS}" "${RUN_PID}")
-  else
-    read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB <<< "None false false -1 -1"
-  fi
-else
-  echo "[*] Waiting web service... from ${IPS[*]}: terminating after ${CHECK_TIMEOUT} secs..."
-  read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_network "${IPS[@]}" false)
-fi
-
-if [ "${PING_RESULT}" = "true" ]; then
-    echo true > ${WORK_DIR}/ping
-    echo ${TIME_PING} > ${WORK_DIR}/time_ping
-    echo ${IP} > ${WORK_DIR}/ip
-fi
-if [ "${WEB_RESULT}" = "true" ]; then
-    echo true > ${WORK_DIR}/web
-    echo ${TIME_WEB} > ${WORK_DIR}/time_web
-fi
-
-# Stop only this image's QEMU (the old `ps aux | grep qemu-system-<arch>`
-# killed every emulation of that architecture on the host).
-trap - INT TERM HUP
-finish
-
-echo "=====  Check inferred emulation end  ====="
+# Check of the inferred emulation: the work is done by firmae/check.py
+# (REFACTORING_PLAN 4.5); this wrapper keeps the old call
+#   ./scripts/check_emulation.sh <image ID> <arch>
+# (scripts/makeNetwork.py, from the FirmAE directory; it reads scratch/<IID>/web).
+# This tool runs as root, so the interpreter must not import anything but the
+# installed code: python3 -I ignores PYTHON* variables and puts neither the
+# working directory nor the script directory on sys.path; check.py adds the
+# installation directory after the standard library itself. The installation
+# is found from this file, never from the working directory. exec: python3
+# replaces this shell, so signals reach it directly (same process group).
+# CDPATH= and >/dev/null: with CDPATH exported, cd would print the directory
+# it found and that output would become part of FIRMAE_HOME.
+FIRMAE_HOME="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." >/dev/null && pwd)"
+exec python3 -I "${FIRMAE_HOME}/firmae/check.py" "$0" "$@"
