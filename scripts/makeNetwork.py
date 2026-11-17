@@ -49,6 +49,23 @@ MAX_READ = 64 * 1024 * 1024
 MAX_NETWORKS = 4
 MAX_INTERFACES = 64     # parsed "interface with address" records, before filtering
 MAX_FORWARD_PORTS = 32  # extra hostfwd rules besides 80/443 (user network)
+# inet_bind records kept by findPorts (distinct (proto, port) pairs). Only
+# MAX_FORWARD_PORTS of them are ever used; the cap keeps "[*] ports: ..." small.
+MAX_PORTS = 256
+# Ports from here up are the kernel's ephemeral range (Linux default
+# ip_local_port_range starts at 32768): binds there are mostly client sockets
+# (fakedns:63481 in the DIR-868L log), not services worth forwarding.
+EPHEMERAL_PORT_MIN = 32768
+# User network: host side of the hostfwd rules. Loopback only, chosen per
+# image in this range. It must not overlap the placeholder NIC sockets
+# (placeholderPort(): 20000 .. 59999) nor the ephemeral range. The same range
+# is checked in scripts/check_emulation.sh (HOSTFWD_PORT_MIN/MAX).
+HOSTFWD_PORT_MIN = 10000
+HOSTFWD_PORT_MAX = 19999
+# one block of host ports per image (80, 443 and MAX_FORWARD_PORTS extras fit),
+# so images whose IIDs differ by less than 250 start in different blocks
+HOSTFWD_BLOCK = 40
+HOSTFWD_FILE = "hostfwd"   # scratch/<IID>/hostfwd: "<proto> <guest port> <host port>" per line
 INFER_DEFAULT_TIMEOUT = 600   # seconds for scripts/inferDefault.py
 MAX_WARNINGS = 5        # per parser call, so a flood of bad lines cannot flood the log
 
@@ -59,6 +76,10 @@ class UnsafeValue(ValueError):
 
 class UnsafeImagePath(Exception):
     """A path in the (guest-written) image that the host must not write through."""
+
+
+class HostPortError(RuntimeError):
+    """No free loopback port left for a hostfwd rule (user network)."""
 
 
 def isIfname(name):
@@ -290,7 +311,7 @@ NET_STARTED=true
 
 # the guest must not open connections to the host or be routed anywhere
 # (rules removed again by cleanup(); see isolate_guest_network in firmae.config)
-isolate_guest_network ${IID}
+isolate_guest_network ${IID}%(HOSTFWD_CHECK)s
 
 # QEMU runs in the background and we `wait` for it: bash does not run traps
 # while a foreground command is running, so Ctrl-C/SIGTERM reach cleanup()
@@ -392,36 +413,60 @@ def findMacChanges(data, endianness):
     return result
 
 
+# Both formats of the FirmAE kernels' inet_bind hook:
+#   4.1 kernels (measured, tests/fixtures/serial/*.log):
+#       inet_bind[PID: 644 (fakedns)]: proto:SOCK_STREAM, port:63481
+#   older format (address in kernel byte order):
+#       inet_bind[PID: 1 (httpd)]: proto:SOCK_STREAM, ip:port: 0x0100a8c0:80
+# Anchored at both ends (\Z, optional \r of a serial line), no nested
+# repetition: linear time on any line. The comm name cannot contain "]".
+INET_BIND_RE = re.compile(
+    rb"^inet_bind\[[^\]]+\]: proto:SOCK_(DGRAM|STREAM), "
+    rb"(?:ip:port: 0x([0-9a-f]+):([0-9]+)|port:([0-9]+))\r?\Z"
+)
+
+
 def findPorts(data, endianness):
+    """(proto, addr, port) of the services the guest bound, in the order of
+    their first bind, one entry per (proto, port). addr is "0.0.0.0" for the
+    4.1 format, which logs no address. Port 0 (kernel picks one) and ports in
+    the ephemeral range (>= EPHEMERAL_PORT_MIN) are dropped, at most MAX_PORTS
+    entries are kept; out-of-range values are skipped with a warning."""
     lines = stripTimestamps(data)
-    candidates = filter(
-        lambda l: l.startswith(b"inet_bind"), lines
-    )  # logs for the inconfig process
+    candidates = filter(lambda l: l.startswith(b"inet_bind"), lines)
     result = []
     if endianness == "eb":
         fmt = ">I"
     elif endianness == "el":
         fmt = "<I"
-    prog = re.compile(
-        rb"^inet_bind\[[^\]]+\]: proto:SOCK_(DGRAM|STREAM), ip:port: 0x([0-9a-f]+):([0-9]+)"
-    )
-    portSet = {}
+    seen = set()
     skipped = []
     for c in candidates:
-        g = prog.match(c)
-        if g:
-            (proto, addr, port) = g.groups()
-            proto = "tcp" if proto == b"STREAM" else "udp"
+        g = INET_BIND_RE.match(c)
+        if not g:
+            continue
+        (proto, addr, port, port41) = g.groups()
+        proto = "tcp" if proto == b"STREAM" else "udp"
+        if port41 is not None:
+            port, addr = port41, "0.0.0.0"
+        else:
             addr = _hexU32(addr)
-            # length check first: int() refuses very long decimal strings
-            port = int(port) if len(port) <= 5 else None
-            if addr is None or port is None or not 1 <= port <= 65535:
+            if addr is None:
                 skipped.append(c)
                 continue
             addr = socket.inet_ntoa(struct.pack(fmt, addr))
-            if port not in portSet:
-                result.append((proto, addr, port))
-                portSet[port] = True
+        # length check first: int() refuses very long decimal strings
+        port = int(port) if len(port) <= 5 else None
+        if port is None or port > 65535:
+            skipped.append(c)
+            continue
+        if port == 0 or port >= EPHEMERAL_PORT_MIN or (proto, port) in seen:
+            continue
+        if len(result) >= MAX_PORTS:
+            print("[!] Warning: more than %d bound ports; ignoring the rest" % MAX_PORTS)
+            break
+        seen.add((proto, port))
+        result.append((proto, addr, port))
     _reportSkipped("inet_bind", skipped)
     return result
 
@@ -559,7 +604,134 @@ def forwardPorts(ports, warn=False):
     return result
 
 
-def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
+def hostPortIsFree(proto, port):
+    """True if `port` can be bound on 127.0.0.1 right now. No SO_REUSEADDR, so a
+    port with connections in TIME_WAIT counts as taken (conservative). A
+    listener on 0.0.0.0:<port> makes this bind fail too. The answer can be
+    stale by the time QEMU binds (TOCTOU): run.sh re-checks the TCP ports and
+    QEMU refuses to start on a taken one."""
+    kind = socket.SOCK_STREAM if proto == "tcp" else socket.SOCK_DGRAM
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def hostfwdBlock(iid):
+    """Start block (0 .. blocks-1) of image iid. The whole IID counts: IIDs in
+    one window of `blocks` consecutive numbers get distinct blocks, and the
+    window number shifts the block by a step coprime to `blocks`, so IIDs that
+    differ by a multiple of 250 no longer share one (they did with iid % 250).
+    Two images can still meet in one block -- 250 blocks for any number of
+    IIDs; then the per-port bind test separates them, and check_emulation.sh
+    checks that a port it reaches belongs to this image's QEMU."""
+    blocks = (HOSTFWD_PORT_MAX - HOSTFWD_PORT_MIN + 1) // HOSTFWD_BLOCK
+    iid = int(iid)
+    return (iid + 97 * (iid // blocks)) % blocks
+
+
+def chooseHostPorts(iid, ports, isFree=hostPortIsFree, warn=False):
+    """Host side of the user-network hostfwd rules: [(proto, guest port, host
+    port)] for 80, 443 and forwardPorts(ports). Host ports come from
+    HOSTFWD_PORT_MIN..HOSTFWD_PORT_MAX, scanned from a per-image start block
+    (so parallel analyses do not pick the same ports), skipping ports that are
+    taken now. Was: host port = guest port (80/443/...), so a host service on
+    port 80 kept QEMU from starting, two emulations collided, and the check
+    could reach the host's own web server. Raises HostPortError if the range
+    has no free port left."""
+    wanted = [("tcp", 80), ("tcp", 443)] + forwardPorts(ports, warn)
+    size = HOSTFWD_PORT_MAX - HOSTFWD_PORT_MIN + 1
+    start = hostfwdBlock(iid) * HOSTFWD_BLOCK
+    result = []
+    offset = 0
+    for (proto, guestPort) in wanted:
+        while True:
+            if offset >= size:
+                raise HostPortError("no free port on 127.0.0.1 in %d-%d for hostfwd %s/%d"
+                                    % (HOSTFWD_PORT_MIN, HOSTFWD_PORT_MAX, proto, guestPort))
+            hostPort = HOSTFWD_PORT_MIN + (start + offset) % size
+            offset += 1
+            if isFree(proto, hostPort):
+                break
+        result.append((proto, guestPort, hostPort))
+    return result
+
+
+HOSTFWD_RULE_RE = re.compile(r"hostfwd=(tcp|udp):127\.0\.0\.1:([0-9]{1,5})-:([0-9]{1,5})(?=[, ]|\Z)")
+
+
+def hostfwdRulesIn(script):
+    """[(proto, guest port, host port)] of the hostfwd rules in the QEMU
+    arguments of a generated run.sh (its "-netdev" lines). process() records
+    exactly these in scratch/<IID>/hostfwd, so the file can never announce a
+    rule that QEMU does not get. Validated like qemuCmd's input."""
+    rules = []
+    for line in script.splitlines():
+        if "-netdev " in line:
+            rules += [(p, int(g), int(h)) for (p, h, g) in HOSTFWD_RULE_RE.findall(line)]
+    checkHostfwd(rules)
+    return rules
+
+
+def hostfwdText(hostfwd):
+    """Contents of scratch/<IID>/hostfwd (read by check_emulation.sh)."""
+    return "".join("%s %d %d\n" % (proto, guest, host) for (proto, guest, host) in hostfwd)
+
+
+def writeStateFile(path, text):
+    """Write a scratch/<IID> state file without following a symlink at `path`
+    and without blocking on (or writing into) a FIFO or device node."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("%s is not a regular file; not writing it" % path)
+        os.set_blocking(fd, True)
+        os.ftruncate(fd, 0)
+        f = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        f.write(text)
+
+
+def removeStateFile(path):
+    """Remove a stale state file (the file or symlink itself, never its target)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+        os.unlink(path)
+
+
+def hostfwdCheck(hostfwd):
+    """Shell lines for run.sh (user network): refuse to start QEMU when one of
+    the chosen TCP host ports has been taken since makeNetwork.py checked it.
+    Only integers validated by checkQemuCmdInputs end up here. Empty for TAP
+    mode, so that run.sh stays byte-for-byte as before."""
+    if not hostfwd:
+        return ""
+    tcp = " ".join(str(host) for (proto, _guest, host) in hostfwd if proto == "tcp")
+    return """
+
+# user network: these loopback ports were free when makeNetwork.py chose them
+# (scratch/<IID>/hostfwd); stop with a clear error if one has been taken since,
+# QEMU would refuse the hostfwd rule anyway
+for HOSTFWD_PORT in %s; do
+    if (exec 3<>/dev/tcp/127.0.0.1/${HOSTFWD_PORT}) 2>/dev/null; then
+        echo "Error: host port 127.0.0.1:${HOSTFWD_PORT} (hostfwd) is in use; re-run makeNetwork.py to choose other ports" >&2
+        exit 1
+    fi
+done""" % tcp
+
+
+def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0, hostfwd=None):
     if arch == "arm":
         device = "virtio-net-device"
     else:
@@ -575,18 +747,21 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
         vlan_id = vlan if vlan else i
         mac_str = "" if not mac else ",macaddr=%s" % mac
         if isUserNetwork:  # user network dhcp server
-            # TODO: get port list (inet_bind)
-            # TODO: maybe need reverse ping checker
-            # portfwd = ",hostfwd=udp::67-:67"
-            # portfwd += ",hostfwd=udp::68-:68" # icmp port cannot foward
+            # ICMP cannot be forwarded; check_emulation.sh probes the web ports.
             # restrict=on: the guest cannot reach the host or the outside world
             # (explicit hostfwd rules are not affected); forwards listen on
-            # loopback only, so the emulated web UI is not exposed to the LAN
-            portfwd = "restrict=on,hostfwd=tcp:127.0.0.1:80-:80,hostfwd=tcp:127.0.0.1:443-:443,"
-            for (proto, port) in forwardPorts(ports):
-                portfwd += "hostfwd=%(TYPE)s:127.0.0.1:%(PORT)i-:%(PORT)i," % {
+            # loopback only, so the emulated web UI is not exposed to the LAN.
+            # Host ports: chooseHostPorts() (free, per image), not the guest
+            # port numbers. hostfwd=[] (another NIC carries the forwards: one
+            # host port can be forwarded only once) gives restrict=on alone.
+            if hostfwd is None:
+                hostfwd = chooseHostPorts(iid, ports)
+            portfwd = "restrict=on,"
+            for (proto, guestPort, hostPort) in hostfwd:
+                portfwd += "hostfwd=%(TYPE)s:127.0.0.1:%(HOST)i-:%(GUEST)i," % {
                     "TYPE": proto,
-                    "PORT": port,
+                    "HOST": hostPort,
+                    "GUEST": guestPort,
                 }
 
             return (
@@ -600,39 +775,63 @@ def qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid=0):
             )
 
 
-def qemuNetworkConfig(arch, network, isUserNetwork, ports, iid=0):
-    output = []
-    assigned = []
+def qemuNetworkConfig(arch, network, isUserNetwork, ports, iid=0, hostfwd=None):
+    return qemuNetworkConfigAndHostfwd(arch, network, isUserNetwork, ports, iid, hostfwd)[0]
+
+
+def qemuNetworkConfigAndHostfwd(arch, network, isUserNetwork, ports, iid=0, hostfwd=None):
+    """(QEMU network arguments, hostfwd rules that are really in them). The
+    second value is what scratch/<IID>/hostfwd must record -- [] when no rule
+    made it into the arguments (TAP mode, or no user NIC placed)."""
     interfaceNum = 4
     if arch == "arm" and checkVariable("FIRMAE_NET"):
         interfaceNum = 1
 
     if isUserNetwork:
-        forwardPorts(ports, warn=True)      # only to report a truncation once
+        if hostfwd is None:
+            hostfwd = chooseHostPorts(iid, ports, warn=True)
+        else:
+            forwardPorts(ports, warn=True)      # only to report a truncation once
 
+    # 1. place the networks on the NICs: slots[i] = (tap_num, network or None)
+    slots = []
+    assigned = []
     for i in range(0, interfaceNum):
         for j, n in enumerate(network):
             # need to connect the jth emulated network interface to the corresponding host interface
             if i == ifaceNo(n[1]):
-                output.append(
-                    qemuArchNetworkConfig(i, j, arch, n, isUserNetwork, ports, iid)
-                )
+                slots.append((j, n))
                 assigned.append(n)
                 break
 
         # otherwise, put placeholder socket connection
-        if len(output) <= i:
-            output.append(qemuArchNetworkConfig(i, i, arch, None, isUserNetwork, ports, iid))
+        if len(slots) <= i:
+            slots.append((i, None))
 
     # find unassigned interfaces
     for j, n in enumerate(network[:interfaceNum]):
         if n not in assigned:
-            # guess assignment
+            # guess assignment (may replace a network placed above)
             print("Warning: Unmatched interface: %s" % (n,))
-            output[j] = qemuArchNetworkConfig(j, j, arch, n, isUserNetwork, ports, iid)
+            slots[j] = (j, n)
             assigned.append(n)
 
-    return " ".join(output)
+    # 2. user network: the hostfwd rules go to exactly one NIC that was really
+    # placed -- the first with a DHCP address, else the first one -- since QEMU
+    # cannot bind one host port twice (every user NIC used to get the same
+    # 80/443 rules). Chosen after placement: a guessed interface can replace
+    # the NIC chosen before, and the rules vanished with it.
+    fwdSlot = None
+    if isUserNetwork:
+        placed = [i for i, (_, n) in enumerate(slots) if n is not None]
+        fwdSlot = next((i for i in placed if isDhcpIp(slots[i][1][0])),
+                       placed[0] if placed else None)
+
+    output = []
+    for i, (tap_num, n) in enumerate(slots):
+        fwd = hostfwd if i == fwdSlot else []
+        output.append(qemuArchNetworkConfig(i, tap_num, arch, n, isUserNetwork, ports, iid, fwd))
+    return " ".join(output), (list(hostfwd) if fwdSlot is not None else [])
 
 
 def buildConfig(brif, iface, vlans, macs):
@@ -742,7 +941,7 @@ sudo tunctl -d ${TAPDEV_%(I)i}
     return "\n".join(output)
 
 
-def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue):
+def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue, hostfwd=None):
     """Second line of defence: the parsers already drop bad records, but nothing
     unchecked may ever be formatted into the root shell script."""
     def bad(what, value):
@@ -776,11 +975,43 @@ def checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue):
         (proto, addr, port) = p
         if proto not in ("tcp", "udp") or not isIpv4(addr) or not _isInt(port, 1, 65535):
             bad("port", p)
+    checkHostfwd(hostfwd)
+
+
+def checkHostfwd(hostfwd):
+    """hostfwd: None or [(proto, guest port, host port)], host ports distinct
+    and inside HOSTFWD_PORT_MIN..HOSTFWD_PORT_MAX."""
+    if hostfwd is None:
+        return
+    if not isinstance(hostfwd, list) or len(hostfwd) > 2 + MAX_FORWARD_PORTS:
+        raise UnsafeValue("refusing to put hostfwd list %r into run.sh" % (hostfwd,))
+    hosts = set()
+    for h in hostfwd:
+        if (not isinstance(h, tuple) or len(h) != 3 or h[0] not in ("tcp", "udp")
+                or not _isInt(h[1], 1, 65535)
+                or not _isInt(h[2], HOSTFWD_PORT_MIN, HOSTFWD_PORT_MAX) or h[2] in hosts):
+            raise UnsafeValue("refusing to put hostfwd rule %r into run.sh" % (h,))
+        hosts.add(h[2])
 
 
 def qemuCmd(
-    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork
+    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
+    hostfwd=None,
 ):
+    """run.sh for this image (see qemuCmdAndHostfwd)."""
+    return qemuCmdAndHostfwd(iid, network, ports, network_type, arch, endianness,
+                             qemuInitValue, isUserNetwork, hostfwd)[0]
+
+
+def qemuCmdAndHostfwd(
+    iid, network, ports, network_type, arch, endianness, qemuInitValue, isUserNetwork,
+    hostfwd=None,
+):
+    """(run.sh, hostfwd rules that run.sh really passes to QEMU). hostfwd (user
+    network only): the rules from chooseHostPorts(); None lets this function
+    choose them. The second value is the only source for scratch/<IID>/hostfwd
+    (process()): a rule is recorded if and only if it is in the QEMU arguments
+    and in run.sh's port pre-check."""
     network_bridge = ""
     network_iface = ""
     if arch == "mips":
@@ -799,14 +1030,22 @@ def qemuCmd(
     else:
         raise Exception("Unsupported architecture")
 
-    checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue)
+    checkQemuCmdInputs(iid, network, ports, network_type, qemuInitValue, hostfwd)
+    if not isUserNetwork:
+        hostfwd = None
+    elif hostfwd is None:
+        hostfwd = chooseHostPorts(iid, ports)
+        checkHostfwd(hostfwd)
 
     for (ip, dev, vlan, mac, brif) in network:
         network_bridge = brif
         network_iface = dev
         break
 
-    return QEMUCMDTEMPLATE % {
+    qemuNetwork, placedHostfwd = qemuNetworkConfigAndHostfwd(
+        arch, network, isUserNetwork, ports, iid, hostfwd)
+    script = QEMUCMDTEMPLATE % {
+        "HOSTFWD_CHECK": hostfwdCheck(placedHostfwd),
         "IID": iid,
         "NETWORK_TYPE": network_type,
         "NET_BRIDGE": network_bridge,
@@ -816,9 +1055,10 @@ def qemuCmd(
         "ARCHEND": arch + endianness,
         "QEMU_DISK": qemuDisk,
         "QEMU_INIT": qemuInitValue,
-        "QEMU_NETWORK": qemuNetworkConfig(arch, network, isUserNetwork, ports, iid),
+        "QEMU_NETWORK": qemuNetwork,
         "QEMU_ENV_VARS": qemuEnvVars,
     }
+    return script, placedHostfwd
 
 
 def getNetworkList(data, ifacesWithIps, macChanges):
@@ -1168,6 +1408,16 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
                 else:
                     out.write("false")
 
+            # user network: loopback host ports for the hostfwd rules, recorded
+            # for check_emulation.sh, which probes only these (TAP mode: no
+            # file, and a stale one from an earlier candidate is removed)
+            hostfwdPath = SCRATCHDIR + "/" + str(iid) + "/" + HOSTFWD_FILE
+            hostfwd = None
+            removeStateFile(hostfwdPath)
+            if isUserNetwork:
+                hostfwd = chooseHostPorts(iid, ports)
+                print("[*] hostfwd (proto, guest port, host port): %r" % hostfwd)
+
             qemuCommandLine = qemuCmd(
                 iid,
                 filterNetworkList,
@@ -1177,7 +1427,13 @@ def process(iid, arch, endianness, makeQemuCmd=False, outfile=None):
                 endianness,
                 qemuInitValue,
                 isUserNetwork,
+                hostfwd,
             )
+            # only the rules that are really in run.sh's QEMU arguments, read
+            # back from the script itself (none: no file)
+            hostfwd = hostfwdRulesIn(qemuCommandLine)
+            if hostfwd:
+                writeStateFile(hostfwdPath, hostfwdText(hostfwd))
 
             with open(outfile, "w") as out:
                 out.write(qemuCommandLine)

@@ -56,15 +56,29 @@ def test_real_log_interfaces(name, read_fixture, firmae_env):
     assert mn.checkNetwork(netlist) == (exp["filtered"], exp["network_type"])
 
 
+A = "0.0.0.0"      # the 4.1 format logs no address
+REAL_PORTS = {
+    # 40 inet_bind lines: port 0 (mDNSResponder, arpmonitor, ntpclient) and the
+    # ephemeral fakedns:63481 and httpd:49152 are dropped, repeats collapse
+    "armel_dir868l": [
+        ("udp", A, 19541), ("udp", A, 5353), ("tcp", A, 4433), ("tcp", A, 443),
+        ("udp", A, 67), ("udp", A, 5355), ("udp", A, 137), ("tcp", A, 53),
+        ("udp", A, 53), ("tcp", A, 8181), ("tcp", A, 80), ("udp", A, 1900),
+        ("tcp", A, 8182)],
+    # 20 lines, 11 of them ntpclient port 0
+    "mipseb_wnap320": [
+        ("tcp", A, 80), ("tcp", A, 443), ("tcp", A, 22), ("udp", A, 161),
+        ("udp", A, 137), ("udp", A, 138)],
+}
+
+
 @pytest.mark.parametrize("name", sorted(REAL))
-def test_real_log_ports_are_never_found(name, read_fixture):
-    """KNOWN BUG: the FirmAE 4.1 kernels log `inet_bind[...]: proto:SOCK_X, port:N`,
-    but findPorts() only matches the older `ip:port: 0x<ip>:<port>` format.
-    Both real firmware images bind many ports (80, 443, 22, 161, ...) yet the
-    result is empty, so DHCP-mode hostfwd falls back to the hard-coded 80/443."""
+def test_real_log_ports(name, read_fixture):
+    """REFACTORING_PLAN 2.10: the FirmAE 4.1 kernels log
+    `inet_bind[...]: proto:SOCK_X, port:N`; findPorts() only knew the older
+    `ip:port: 0x<ip>:<port>` format and always returned []."""
     data = read_fixture("serial/serial_%s.log" % name)
-    assert b"inet_bind" in data
-    assert mn.findPorts(data, REAL[name]["end"]) == []
+    assert mn.findPorts(data, REAL[name]["end"]) == REAL_PORTS[name]
 
 
 # --------------------------------------------------------------------------
@@ -75,14 +89,29 @@ def test_strip_timestamps_removes_prefix():
     assert mn.stripTimestamps(log("abc", "def")) == [b"abc", b"def", b""]
 
 
-def test_find_ports_legacy_format_and_dedup_by_port():
+def test_find_ports_legacy_format_and_dedup_by_proto_and_port():
     data = log(
         "inet_bind[PID: 1 (httpd)]: proto:SOCK_STREAM, ip:port: 0x0100a8c0:80",
         "inet_bind[PID: 1 (httpd)]: proto:SOCK_DGRAM, ip:port: 0x0100a8c0:80",
+        "inet_bind[PID: 1 (httpd)]: proto:SOCK_STREAM, ip:port: 0x0200a8c0:80",
         "inet_bind[PID: 2 (snmpd)]: proto:SOCK_DGRAM, ip:port: 0x00000000:161",
     )
-    # de-duplicated by port number only; the first protocol seen wins
-    assert mn.findPorts(data, "el") == [("tcp", "192.168.0.1", 80), ("udp", "0.0.0.0", 161)]
+    # one entry per (proto, port) -- was per port only, so udp/80 vanished
+    # behind tcp/80; the first address seen wins
+    assert mn.findPorts(data, "el") == [("tcp", "192.168.0.1", 80), ("udp", "192.168.0.1", 80),
+                                        ("udp", "0.0.0.0", 161)]
+    assert mn.findPorts(data, "eb")[0] == ("tcp", "1.0.168.192", 80)
+
+
+def test_find_ports_both_formats_in_one_log():
+    data = log(
+        "inet_bind[PID: 644 (fakedns)]: proto:SOCK_STREAM, port:8080",
+        "inet_bind[PID: 1 (httpd)]: proto:SOCK_STREAM, ip:port: 0x0100a8c0:8080",   # repeat
+        "inet_bind[PID: 1 (httpd)]: proto:SOCK_STREAM, ip:port: 0x0100a8c0:81",
+        "inet_bind[PID: 2 (dnsmasq)]: proto:SOCK_DGRAM, port:53",
+    )
+    assert mn.findPorts(data, "el") == [("tcp", "0.0.0.0", 8080), ("tcp", "192.168.0.1", 81),
+                                        ("udp", "0.0.0.0", 53)]
 
 
 @pytest.mark.parametrize("end,hexaddr", [("el", "0x0100a8c0"), ("eb", "0xc0a80001")])

@@ -7,6 +7,7 @@ image preparation failure. No root, no real QEMU, mount or TAP.
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.linux
 
 FAKE_QEMU = """#!/bin/bash
 echo "qemu start $$" >> "$LOG"
+if [ -n "${QEMU_LOG_ARGS:-}" ]; then echo "qemu args $*" >> "$LOG"; fi
 trap 'echo "qemu got TERM" >> "$LOG"; exit 0' TERM
 if [ -n "${QEMU_EXIT_AFTER:-}" ]; then sleep "$QEMU_EXIT_AFTER"; echo "qemu exit" >> "$LOG"; exit 0; fi
 while true; do sleep 0.1; done
@@ -70,6 +72,7 @@ def world(repo_root, tmp_path, firmae_env, iptables_stubs):
         """Logged commands; the firewall ones only when asked (they have their own test)."""
         lines = log.read_text().splitlines() if log.exists() else []
         return [l for l in lines if firewall or not l.startswith(("iptables ", "ip6tables "))]
+    start.run_sh = run_sh
     return start, calls
 
 
@@ -164,3 +167,47 @@ def test_image_preparation_failure_releases_the_loop_device(world):
     c = calls()
     assert "del_partition /dev/fakeloop0" in c   # loop device was leaked before
     assert not any(x.startswith("tunctl") for x in c)
+
+
+DHCP_NET = [("10.0.2.15", "eth0", None, None, "br0")]
+
+
+def test_user_network_run_sh_passes_loopback_hostfwd_to_qemu(world):
+    """REFACTORING_PLAN 5.1: QEMU gets the chosen loopback host ports, not
+    host port = guest port."""
+    start, calls = world
+    hf = [("tcp", 80, 10004), ("tcp", 443, 10005), ("udp", 161, 10006)]
+    script = mn.qemuCmd(1, DHCP_NET, [("udp", "0.0.0.0", 161)], "normal", "mips", "el",
+                        "rdinit=/firmadyne/preInit.sh", True, hf)
+    start.run_sh.write_text(script)
+    p = start(QEMU_EXIT_AFTER="1", QEMU_LOG_ARGS="1")
+    out, _ = p.communicate(timeout=60)
+    assert p.returncode == 0, out
+    args = next(c for c in calls() if c.startswith("qemu args "))
+    assert ("-netdev user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:10004-:80,"
+            "hostfwd=tcp:127.0.0.1:10005-:443,hostfwd=udp:127.0.0.1:10006-:161 ") in args
+
+
+def test_user_network_run_sh_stops_before_qemu_if_a_host_port_is_taken(world):
+    start, calls = world
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    taken = s.getsockname()[1]
+    try:
+        # the kernel picks the port this test holds (it may lie outside the
+        # hostfwd range, which qemuCmd refuses): patch it into the pre-check
+        script = mn.qemuCmd(1, DHCP_NET, [], "normal", "mips", "el",
+                            "rdinit=/firmadyne/preInit.sh", True,
+                            [("tcp", 80, 10004), ("tcp", 443, 10005)])
+        script = script.replace("for HOSTFWD_PORT in 10004 10005; do",
+                                "for HOSTFWD_PORT in 10004 %d; do" % taken)
+        start.run_sh.write_text(script)
+        p = start(QEMU_EXIT_AFTER="1")
+        out, _ = p.communicate(timeout=60)
+    finally:
+        s.close()
+    assert p.returncode == 1, out
+    assert "127.0.0.1:%d (hostfwd) is in use" % taken in out
+    assert not any(c.startswith("qemu start") for c in calls())
+    assert out.rstrip().endswith("Done!")            # cleanup() ran

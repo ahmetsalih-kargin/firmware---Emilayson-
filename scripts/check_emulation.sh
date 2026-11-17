@@ -41,9 +41,19 @@ trap 'finish; exit 129' HUP
 sleep 10
 
 IPS=()
+DHCP=false
+HOSTFWD_HTTP=""
+HOSTFWD_HTTPS=""
 if (egrep -sq true ${WORK_DIR}/isDhcp); then
-  IPS+=("127.0.0.1")
-  echo true > ${WORK_DIR}/ping
+  # User network (DHCP mode): probe only the forwarded host ports recorded in
+  # ${WORK_DIR}/hostfwd, and only while this image's QEMU owns them
+  # (scripts/hostfwd_check.sh). No unconditional ping=true any more.
+  DHCP=true
+  if ! source "$(dirname "${BASH_SOURCE[0]}")/hostfwd_check.sh"; then
+    echo "[!] scripts/hostfwd_check.sh not found: no web check (web=false)"
+  elif ! read_hostfwd "${WORK_DIR}/hostfwd"; then
+    echo "[!] ${WORK_DIR}/hostfwd is missing or invalid: no web check (web=false)"
+  fi
 else
   # a missing/garbled ip_num must not end the script under `set -e` before
   # finish() has stopped run.sh (no IP: check_network returns at once)
@@ -61,8 +71,17 @@ else
   done
 fi
 
-echo "[*] Waiting web service... from ${IPS[*]}: terminating after ${CHECK_TIMEOUT} secs..."
-read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_network "${IPS[@]}" false)
+if ${DHCP}; then
+  echo "[*] Waiting web service... on 127.0.0.1 port(s) ${HOSTFWD_HTTP:--}/${HOSTFWD_HTTPS:--} (guest 80/443): terminating after ${CHECK_TIMEOUT} secs..."
+  if [ -n "${HOSTFWD_HTTP}${HOSTFWD_HTTPS}" ]; then
+    read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_hostfwd "${IID}" "${HOSTFWD_HTTP}" "${HOSTFWD_HTTPS}" "${RUN_PID}")
+  else
+    read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB <<< "None false false -1 -1"
+  fi
+else
+  echo "[*] Waiting web service... from ${IPS[*]}: terminating after ${CHECK_TIMEOUT} secs..."
+  read IP PING_RESULT WEB_RESULT TIME_PING TIME_WEB < <(check_network "${IPS[@]}" false)
+fi
 
 if [ "${PING_RESULT}" = "true" ]; then
     echo true > ${WORK_DIR}/ping

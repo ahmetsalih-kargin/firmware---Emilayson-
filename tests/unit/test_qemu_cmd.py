@@ -6,6 +6,8 @@ generated for the same firmware in Phase 0. Any refactoring of the QEMU or
 network code must keep these passing (or change them deliberately).
 """
 
+import re
+
 import pytest
 
 from scripts import makeNetwork as mn
@@ -61,11 +63,39 @@ def test_user_network_is_isolated_and_forwards_on_loopback_only(firmae_env):
     80/443 of ALL interfaces and unrestricted access to the host's network."""
     net = [("10.0.2.15", "eth0", None, None, "br0")]
     out = mn.qemuArchNetworkConfig(0, 0, "mips", net[0], True,
-                                   [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 80)])
+                                   [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 80)],
+                                   hostfwd=[("tcp", 80, 10000), ("tcp", 443, 10001),
+                                            ("tcp", 8080, 10002)])
     assert out == ("-device e1000,netdev=net0 -netdev user,id=net0,restrict=on,"
-                   "hostfwd=tcp:127.0.0.1:80-:80,hostfwd=tcp:127.0.0.1:443-:443,"
-                   "hostfwd=tcp:127.0.0.1:8080-:8080")
+                   "hostfwd=tcp:127.0.0.1:10000-:80,hostfwd=tcp:127.0.0.1:10001-:443,"
+                   "hostfwd=tcp:127.0.0.1:10002-:8080")
+    assert "restrict=on" in out
+    rules = re.findall(r"hostfwd=[^, ]+", out)
+    assert len(rules) == 3
+    assert all(r.startswith("hostfwd=tcp:127.0.0.1:") for r in rules)
     assert "hostfwd=tcp::" not in out and "hostfwd=udp::" not in out
+    assert "0.0.0.0" not in out and "hostfwd=tcp:-" not in out
+
+
+def test_user_network_without_hostfwd_chooses_loopback_ports(firmae_env):
+    """hostfwd=None: the ports come from chooseHostPorts() -- guest 80, 443 and
+    the extra guest ports (80 is never repeated), on free host ports in
+    HOSTFWD_PORT_MIN..MAX, loopback only. hostfwd=[]: restrict=on and no rule
+    (another NIC carries the forwards)."""
+    net = [("10.0.2.15", "eth0", None, None, "br0")]
+    out = mn.qemuArchNetworkConfig(0, 0, "mips", net[0], True,
+                                   [("tcp", "0.0.0.0", 8080), ("udp", "0.0.0.0", 80)], iid=7)
+    assert "restrict=on" in out
+    rules = re.findall(r"hostfwd=(\w+):127\.0\.0\.1:(\d+)-:(\d+)", out)
+    assert [(p, int(g)) for (p, _h, g) in rules] == [("tcp", 80), ("tcp", 443), ("tcp", 8080)]
+    hosts = [int(h) for (_p, h, _g) in rules]
+    assert len(set(hosts)) == 3
+    assert all(mn.HOSTFWD_PORT_MIN <= h <= mn.HOSTFWD_PORT_MAX for h in hosts)
+    assert out.count("hostfwd=") == 3 and "hostfwd=tcp::" not in out
+
+    none = mn.qemuArchNetworkConfig(0, 0, "mips", net[0], True, [("tcp", "0.0.0.0", 8080)],
+                                    hostfwd=[])
+    assert none == "-device e1000,netdev=net0 -netdev user,id=net0,restrict=on"
 
 
 def test_unmatched_interface_is_guessed_by_position(firmae_env, capsys):
