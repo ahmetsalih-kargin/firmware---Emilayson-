@@ -17,7 +17,8 @@ This module therefore
   * bounds every dictionary (devices, modules, samples, process names),
   * never uses log content as a command or a path.
 
-Result layout (all keys always present):
+Result layout (all keys always present, except `exec`: see "Command-line
+trace" below):
 
   logs      [{name, lines, bytes, truncated, error}]  one entry per input path
   events    {kind: {"count": int, "samples": [str]}}
@@ -97,6 +98,68 @@ Limitations: a guest can still hide a generic error (open failed, no such
 device, mtd/watchdog/gpio) by printing it inside a perfectly formed trace
 prefix, or simply by not printing it; the counts describe what the guest
 chose to log.
+
+Command-line trace (analyze mode only)
+--------------------------------------
+With the analyze-mode kernel command line (`firmadyne.syscall=32`, used by
+scratch/<IID>/run_analyze.sh, which writes qemu.final.serial.log) the FirmAE
+kernel logs every execve as one line, with no timestamp, followed by an
+environment line:
+
+    [ANALYZE] [PID: 377 (S24sealpac.sh)]: mount -t squashfs /dev/mtdblock/4 /htdocs/...
+    envp: HOME=/ TERM=vt102 PATH=/sbin:/usr/sbin:/bin:/usr/bin ...
+
+argv is printed joined by single spaces; an argv element that contains a
+newline continues on the following line(s) without a prefix (those lines are
+not exec lines). In the measured logs no exec line was longer than 400
+characters, and many were exactly 400: the kernel apparently truncates there
+(not verified in the kernel source), so the last token of a line of
+EXEC_KERNEL_CAP or more characters (or of a line clipped at MAX_LINE_BYTES)
+is not used. The normal mode (syscall=1) prints no such lines; open/openat/
+ioctl are not logged in either mode.
+
+Only a line that, after sanitising, STARTS with the exact prefix
+"[ANALYZE] [PID: <digits> (<name without parentheses, <= 32>)]: " is an exec
+line ("[ANALYZE]" in the middle of a line is ordinary text). "envp:" lines
+and continuation lines are never parsed as commands. Exec lines are treated
+like firmadyne trace lines: they are never events of the generic kinds (a
+command such as `event WPS.ERROR add usockc /var/gpio_ctrl` is not a gpio
+error) but are still checked for kernel_panic, segfault and
+module_load_failed. Exec lines do not feed `respawn`.
+
+Result key `exec` -- present ONLY when at least one exec line was seen, so the
+result for a log without exec lines is exactly what it was before:
+
+  exec  {"lines": int,                 exec lines seen (all of them)
+         "commands": {name: int},      basename of argv[0] ("busybox X" counts
+                                       as X); at most MAX_EXEC_COMMANDS names
+                                       of [A-Za-z0-9_.+-]{1,64}; others skipped
+         "device_args": {"/dev/...": {"count": int, "commands": [name, ...]}},
+                                       exec lines with this /dev path as an
+                                       argument (once per line), with the first
+                                       MAX_EXEC_DEV_COMMANDS command names that
+                                       used it; at most MAX_EXEC_DEVICES paths
+         "hw_tools": {tool: int},      exec lines whose command is in HW_TOOLS
+         "truncated": bool}            a table above overflowed, or a log was
+                                       cut short (the top-level `truncated` is
+                                       NOT changed by an exec table overflow)
+
+A device argument is a whitespace-separated token (after the shell
+separators ; | & ( ) ` became spaces, one pair of matching surrounding quotes
+removed and a dd-style "if="/"of=" prefix removed) that is exactly
+/dev/<1-5 components of [A-Za-z0-9_.+-]{1,40}> (trailing "/" removed), with no
+"." or ".." component (no /dev/../etc/shadow). The target of a redirection
+(">", ">>", "<", "2>", ... as a separate token; an attached ">/dev/x" is not a
+/dev token anyway) is never a device argument, nor are the always-present
+pseudo devices in _EXEC_BENIGN (/dev/null, /dev/zero, /dev/console, /dev/tty,
+/dev/tty<N>, /dev/pts*, ...); /dev/ttyS*, /dev/ttyUSB*, /dev/ttyAMA* are UARTs
+and are kept. At most _EXEC_TOKENS tokens of a line are looked at.
+
+HW_TOOLS is a fixed, deliberately short whitelist of userland tools whose
+only purpose is to drive a peripheral (exact names, no prefixes), with the
+peripheral class firmae.hwprofile uses for them. A command line is what the
+guest tried to run, not proof that it ran or that the hardware answered; a
+guest can print fake exec lines (it can only ADD evidence that way).
 """
 
 import os
@@ -118,6 +181,29 @@ _BLOCK = 256 * 1024
 _MAX_NAMES = 200          # distinct process names tracked per log
 _MAX_PIDS = 256           # distinct pids remembered per name
 _NAME_LEN = 100
+MAX_EXEC_COMMANDS = 200   # distinct command names in exec["commands"]
+MAX_EXEC_DEVICES = 200    # distinct paths in exec["device_args"]
+MAX_EXEC_DEV_COMMANDS = 3  # command names kept per device argument
+EXEC_KERNEL_CAP = 400     # exec line length at which the kernel seems to cut
+_EXEC_TOKENS = 64         # argv tokens examined per exec line
+
+# tool (exact basename of argv[0]) -> peripheral class of firmae.hwprofile.
+# Only tools that exist to drive one kind of peripheral (mtd-utils, i2c-tools,
+# libgpiod, the spidev test tools, OpenWrt's mtd); no generic tools (dd, cat,
+# mount, echo) and no prefixes.
+HW_TOOLS = {
+    "flash_erase": "mtd", "flash_eraseall": "mtd", "flashcp": "mtd", "flash_lock": "mtd",
+    "flash_unlock": "mtd", "nandwrite": "mtd", "nanddump": "mtd", "nandtest": "mtd",
+    "mtd": "mtd", "mtd_write": "mtd", "mtd_debug": "mtd", "mtdinfo": "mtd",
+    "ubiattach": "mtd", "ubidetach": "mtd", "ubiformat": "mtd", "ubimkvol": "mtd",
+    "ubiupdatevol": "mtd",
+    "i2cget": "i2c", "i2cset": "i2c", "i2cdetect": "i2c", "i2cdump": "i2c", "i2ctransfer": "i2c",
+    "spidev_test": "spi", "spi-config": "spi", "spi-pipe": "spi",
+    "gpio": "gpio", "gpioget": "gpio", "gpioset": "gpio", "gpiodetect": "gpio",
+    "gpioinfo": "gpio", "gpiomon": "gpio", "gpiofind": "gpio",
+    "watchdog": "watchdog",
+    "ledctrl": "led", "led": "led",
+}
 
 EVENT_KINDS = (
     "device_open_failed", "no_such_device", "hook_register_failed",
@@ -149,6 +235,19 @@ _MODNAME_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 _MODNAME_FULL = re.compile(r"[A-Za-z0-9_.+-]{1,64}\Z")
 _MOD_SKIP = frozenset(("can't", "cannot", "load", "insert", "module", "fatal", "error",
                        "failed", "unknown", "symbol", "in", "not", "found", "the"))
+
+# exec lines: anchored prefix; the name class excludes the parentheses that
+# follow it, so matching is linear.
+_EXEC_RE = re.compile(r"\[ANALYZE\] \[PID: \d{1,10} \([^()]{0,32}\)\]: ")
+_EXEC_NAME_RE = re.compile(r"[A-Za-z0-9_.+-]{1,64}\Z")
+_EXEC_DEV_RE = re.compile(r"/dev/[A-Za-z0-9_.+-]{1,40}(?:/[A-Za-z0-9_.+-]{1,40}){0,4}\Z")
+_REDIR_RE = re.compile(r"[0-9]{0,2}[<>]{1,2}\Z")     # after _EXEC_SEP: "&>" is " >"
+_EXEC_SEP = str.maketrans(";|&()`", "      ")
+_EXEC_BENIGN = frozenset(("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
+                          "/dev/console", "/dev/ptmx", "/dev/kmsg", "/dev/stdin", "/dev/stdout",
+                          "/dev/stderr", "/dev/tty", "/dev/pts", "/dev/fd"))
+_EXEC_BENIGN_PREFIX = ("/dev/pts/", "/dev/fd/", "/dev/tty")
+_UART_PREFIX = ("/dev/ttyS", "/dev/ttyUSB", "/dev/ttyAMA")     # = firmae.hwprofile PATH_RULES
 
 _OPEN_WORDS = ("can't open", "cannot open", "unable to open", "failed to open",
                "error opening", "open failed", "failed opening")
@@ -237,6 +336,98 @@ def _empty_events():
     return {k: {"count": 0, "samples": []} for k in EVENT_KINDS}
 
 
+def _unquote(tok):
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "'\"":
+        return tok[1:-1]
+    return tok
+
+
+def exec_device_arg(token):
+    """Normalised /dev path of one argv token of an exec line, or None (not a
+    device path, a "."/".." component, or an always-present pseudo device).
+    Also used by firmae.hwprofile to re-validate exec["device_args"] keys."""
+    if not isinstance(token, str) or len(token) > 260:
+        return None
+    tok = _unquote(token)
+    if tok[:3] in ("if=", "of="):
+        tok = tok[3:]
+    tok = tok.rstrip("/")
+    if not tok.startswith("/dev/") or not _EXEC_DEV_RE.match(tok):
+        return None
+    for comp in tok.split("/")[2:]:
+        if comp in (".", ".."):
+            return None
+    if tok in _EXEC_BENIGN or (tok.startswith(_EXEC_BENIGN_PREFIX) and not tok.startswith(_UART_PREFIX)):
+        return None
+    return tok
+
+
+def _exec_command(toks):
+    """Command name (basename of argv[0]; "busybox X" -> X) or None."""
+    if not toks:
+        return None
+    name = _unquote(toks[0]).rsplit("/", 1)[-1]
+    if name == "busybox" and len(toks) > 1:
+        name = _unquote(toks[1]).rsplit("/", 1)[-1]
+    return name if _EXEC_NAME_RE.match(name) else None
+
+
+class _Exec(object):
+    """The `exec` section (command-line trace of analyze mode)."""
+
+    def __init__(self):
+        self.lines = 0
+        self.commands = {}
+        self.devices = {}
+        self.tools = {}
+        self.overflow = False
+
+    def add(self, body, cut):
+        """body: the text after the exec prefix; cut: its last token may be partial."""
+        self.lines += 1
+        toks = body.translate(_EXEC_SEP).split()
+        if cut and toks:
+            toks.pop()
+        toks = toks[:_EXEC_TOKENS]
+        cmd = _exec_command(toks)
+        if cmd is not None:
+            if cmd in self.commands:
+                self.commands[cmd] += 1
+            elif len(self.commands) < MAX_EXEC_COMMANDS:
+                self.commands[cmd] = 1
+            else:
+                self.overflow = True
+            if cmd in HW_TOOLS:
+                self.tools[cmd] = self.tools.get(cmd, 0) + 1
+        seen = set()
+        skip = False
+        for tok in toks[1:]:
+            if skip:
+                skip = False
+                continue
+            if _REDIR_RE.match(tok):
+                skip = True              # the next token is a redirection target
+                continue
+            dev = exec_device_arg(tok)
+            if dev is None or dev in seen:
+                continue
+            seen.add(dev)
+            entry = self.devices.get(dev)
+            if entry is None:
+                if len(self.devices) >= MAX_EXEC_DEVICES:
+                    self.overflow = True
+                    continue
+                entry = self.devices[dev] = {"count": 0, "commands": []}
+            entry["count"] += 1
+            if cmd is not None and cmd not in entry["commands"] \
+                    and len(entry["commands"]) < MAX_EXEC_DEV_COMMANDS:
+                entry["commands"].append(cmd)
+
+    def result(self, log_truncated):
+        return {"lines": self.lines, "commands": self.commands, "device_args": self.devices,
+                "hw_tools": self.tools, "truncated": self.overflow or log_truncated}
+
+
 class _Acc(object):
     """Accumulator shared by all logs of one scan."""
 
@@ -245,6 +436,7 @@ class _Acc(object):
         self.devices = {}
         self.modules = {}
         self.modules_overflow = False
+        self.exec = _Exec()
 
     def add_event(self, kind, text, count=True, sample=True):
         ev = self.events[kind]
@@ -295,14 +487,19 @@ class _LineScanner(object):
         text = raw.translate(None, _DROP).decode("ascii")
         if len(text) < 6:
             return
+        trace = False
+        if text.startswith("[ANALYZE] [PID: "):
+            m = _EXEC_RE.match(text)
+            if m:
+                trace = True
+                self.acc.exec.add(text[m.end():], over or len(text) >= EXEC_KERNEL_CAP)
         low = text.lower()
         for key in _GATE:
             if key in low:
                 break
         else:
             return
-        trace = False
-        if "firmadyne" in low:
+        if "firmadyne" in low and not trace:
             m = _TS_RE.match(text)
             body = text[m.end():] if m else text
             t = _TRACE_RE.match(body)
@@ -466,14 +663,18 @@ def scan_serial_logs(paths, *, deadline=None):
             spawn_total[name] = spawn_total.get(name, 0) + n
     hot = [(n, name) for name, n in spawn_total.items() if n >= RESPAWN_MIN]
     hot.sort(key=lambda t: (-t[0], t[1]))
-    return {
+    log_truncated = any(l["truncated"] for l in logs)
+    result = {
         "logs": logs,
         "events": acc.events,
         "devices": acc.devices,
         "modules": acc.modules,
         "respawn": {name: n for n, name in hot[:RESPAWN_TOP]},
-        "truncated": any(l["truncated"] for l in logs) or acc.modules_overflow,
+        "truncated": log_truncated or acc.modules_overflow,
     }
+    if acc.exec.lines:          # only then: unchanged result for logs without exec lines
+        result["exec"] = acc.exec.result(log_truncated)
+    return result
 
 
 def scan_serial_log(path, *, deadline=None):

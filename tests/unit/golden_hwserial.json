@@ -1,0 +1,1279 @@
+{
+ "_about": "hwserial/hwprofile output of commit ad1aad7 (before phase 6.2) for these fixtures; regenerate only on a deliberate format change",
+ "fixtures": [
+  "hw_binary.log",
+  "hw_clean.log",
+  "hw_gpio.log",
+  "hw_hook.log",
+  "hw_module.log",
+  "hw_mtd.log",
+  "hw_nosuch.log",
+  "hw_open.log",
+  "hw_panic.log",
+  "hw_respawn.log",
+  "hw_segv.log",
+  "hw_watchdog.log",
+  "serial_armel_dir868l.log",
+  "serial_mipseb_wnap320.log"
+ ],
+ "merged": {
+  "devices": {
+   "/dev/mtd5": {
+    "errors": 1
+   },
+   "/dev/mtdblock/4": {
+    "errors": 1
+   },
+   "/dev/nvram": {
+    "errors": 3
+   },
+   "/dev/ttyS1": {
+    "errors": 1
+   }
+  },
+  "events": {
+   "device_open_failed": {
+    "count": 1,
+    "samples": [
+     "/bin/sh: can't open /dev/ttyS1: No such file"
+    ]
+   },
+   "gpio_error": {
+    "count": 2,
+    "samples": [
+     "kobject_add_internal failed for gpio with -EEXIST, dont try to register things with the same name",
+     "sysfs: cannot create duplicate filename '/class/gpio'"
+    ]
+   },
+   "hook_register_failed": {
+    "count": 3,
+    "samples": [
+     "firmadyne: Cannot register character device: watchdog, 0xa, 0x82!",
+     "firmadyne: Cannot register character device: wdt, 0xfd, 0x0!",
+     "firmadyne: Cannot create device class: gpio!"
+    ]
+   },
+   "kernel_panic": {
+    "count": 1,
+    "samples": [
+     "Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)"
+    ]
+   },
+   "module_load_failed": {
+    "count": 1,
+    "samples": [
+     "insmod: can't insert '/lib/modules/nf_nat_proto_gre.ko': unknown symbol in module, or unknown parameter"
+    ]
+   },
+   "mtd_error": {
+    "count": 2,
+    "samples": [
+     "mount: mounting /dev/mtdblock/4 on /htdocs/web/js/localization failed: Invalid argument",
+     "Error Writing device /dev/mtd5."
+    ]
+   },
+   "no_such_device": {
+    "count": 6,
+    "samples": [
+     "bad utf8  /dev/nvram: No such device",
+     "/dev/nvram: No such device",
+     "wifia0: WLC_GET_VAR(chanspec): No such device",
+     "ifconfig: SIOCSIFTXQLEN: No such device",
+     "/usr/local/bin/wlanconfig: ioctl: No such device"
+    ]
+   },
+   "segfault": {
+    "count": 1,
+    "samples": [
+     "do_page_fault(): sending SIGSEGV to hostapd_tr for invalid read access from 00000004"
+    ]
+   },
+   "watchdog_error": {
+    "count": 2,
+    "samples": [
+     "Starting watchdog.          Error in opening the device.",
+     "Starting Reset Detect.      Error in opening the device"
+    ]
+   }
+  },
+  "logs": [
+   {
+    "bytes": 41,
+    "error": null,
+    "lines": 1,
+    "name": "hw_binary.log",
+    "truncated": false
+   },
+   {
+    "bytes": 256,
+    "error": null,
+    "lines": 4,
+    "name": "hw_clean.log",
+    "truncated": false
+   },
+   {
+    "bytes": 178,
+    "error": null,
+    "lines": 3,
+    "name": "hw_gpio.log",
+    "truncated": false
+   },
+   {
+    "bytes": 217,
+    "error": null,
+    "lines": 3,
+    "name": "hw_hook.log",
+    "truncated": false
+   },
+   {
+    "bytes": 206,
+    "error": null,
+    "lines": 2,
+    "name": "hw_module.log",
+    "truncated": false
+   },
+   {
+    "bytes": 176,
+    "error": null,
+    "lines": 3,
+    "name": "hw_mtd.log",
+    "truncated": false
+   },
+   {
+    "bytes": 189,
+    "error": null,
+    "lines": 5,
+    "name": "hw_nosuch.log",
+    "truncated": false
+   },
+   {
+    "bytes": 45,
+    "error": null,
+    "lines": 1,
+    "name": "hw_open.log",
+    "truncated": false
+   },
+   {
+    "bytes": 94,
+    "error": null,
+    "lines": 1,
+    "name": "hw_panic.log",
+    "truncated": false
+   },
+   {
+    "bytes": 993,
+    "error": null,
+    "lines": 13,
+    "name": "hw_respawn.log",
+    "truncated": false
+   },
+   {
+    "bytes": 85,
+    "error": null,
+    "lines": 1,
+    "name": "hw_segv.log",
+    "truncated": false
+   },
+   {
+    "bytes": 139,
+    "error": null,
+    "lines": 2,
+    "name": "hw_watchdog.log",
+    "truncated": false
+   },
+   {
+    "bytes": 4002,
+    "error": null,
+    "lines": 46,
+    "name": "serial_armel_dir868l.log",
+    "truncated": false
+   },
+   {
+    "bytes": 2025,
+    "error": null,
+    "lines": 24,
+    "name": "serial_mipseb_wnap320.log",
+    "truncated": false
+   }
+  ],
+  "modules": {
+   "nf_nat_proto_gre.ko": {
+    "errors": 1
+   }
+  },
+  "respawn": {
+   "ntpclient": 24
+  },
+  "truncated": false
+ },
+ "profile": {
+  "dynamic": {
+   "devices": {
+    "/dev/mtd5": {
+     "errors": 1
+    },
+    "/dev/mtdblock/4": {
+     "errors": 1
+    },
+    "/dev/nvram": {
+     "errors": 3
+    },
+    "/dev/ttyS1": {
+     "errors": 1
+    }
+   },
+   "events": {
+    "device_open_failed": {
+     "count": 1,
+     "samples": [
+      "/bin/sh: can't open /dev/ttyS1: No such file"
+     ]
+    },
+    "gpio_error": {
+     "count": 2,
+     "samples": [
+      "kobject_add_internal failed for gpio with -EEXIST, dont try to register things with the same name",
+      "sysfs: cannot create duplicate filename '/class/gpio'"
+     ]
+    },
+    "hook_register_failed": {
+     "count": 3,
+     "samples": [
+      "firmadyne: Cannot register character device: watchdog, 0xa, 0x82!",
+      "firmadyne: Cannot register character device: wdt, 0xfd, 0x0!",
+      "firmadyne: Cannot create device class: gpio!"
+     ]
+    },
+    "kernel_panic": {
+     "count": 1,
+     "samples": [
+      "Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)"
+     ]
+    },
+    "module_load_failed": {
+     "count": 1,
+     "samples": [
+      "insmod: can't insert '/lib/modules/nf_nat_proto_gre.ko': unknown symbol in module, or unknown parameter"
+     ]
+    },
+    "mtd_error": {
+     "count": 2,
+     "samples": [
+      "mount: mounting /dev/mtdblock/4 on /htdocs/web/js/localization failed: Invalid argument",
+      "Error Writing device /dev/mtd5."
+     ]
+    },
+    "no_such_device": {
+     "count": 6,
+     "samples": [
+      "bad utf8  /dev/nvram: No such device",
+      "/dev/nvram: No such device",
+      "wifia0: WLC_GET_VAR(chanspec): No such device",
+      "ifconfig: SIOCSIFTXQLEN: No such device",
+      "/usr/local/bin/wlanconfig: ioctl: No such device"
+     ]
+    },
+    "segfault": {
+     "count": 1,
+     "samples": [
+      "do_page_fault(): sending SIGSEGV to hostapd_tr for invalid read access from 00000004"
+     ]
+    },
+    "watchdog_error": {
+     "count": 2,
+     "samples": [
+      "Starting watchdog.          Error in opening the device.",
+      "Starting Reset Detect.      Error in opening the device"
+     ]
+    }
+   },
+   "logs": [
+    {
+     "bytes": 41,
+     "error": null,
+     "lines": 1,
+     "name": "hw_binary.log",
+     "truncated": false
+    },
+    {
+     "bytes": 256,
+     "error": null,
+     "lines": 4,
+     "name": "hw_clean.log",
+     "truncated": false
+    },
+    {
+     "bytes": 178,
+     "error": null,
+     "lines": 3,
+     "name": "hw_gpio.log",
+     "truncated": false
+    },
+    {
+     "bytes": 217,
+     "error": null,
+     "lines": 3,
+     "name": "hw_hook.log",
+     "truncated": false
+    },
+    {
+     "bytes": 206,
+     "error": null,
+     "lines": 2,
+     "name": "hw_module.log",
+     "truncated": false
+    },
+    {
+     "bytes": 176,
+     "error": null,
+     "lines": 3,
+     "name": "hw_mtd.log",
+     "truncated": false
+    },
+    {
+     "bytes": 189,
+     "error": null,
+     "lines": 5,
+     "name": "hw_nosuch.log",
+     "truncated": false
+    },
+    {
+     "bytes": 45,
+     "error": null,
+     "lines": 1,
+     "name": "hw_open.log",
+     "truncated": false
+    },
+    {
+     "bytes": 94,
+     "error": null,
+     "lines": 1,
+     "name": "hw_panic.log",
+     "truncated": false
+    },
+    {
+     "bytes": 993,
+     "error": null,
+     "lines": 13,
+     "name": "hw_respawn.log",
+     "truncated": false
+    },
+    {
+     "bytes": 85,
+     "error": null,
+     "lines": 1,
+     "name": "hw_segv.log",
+     "truncated": false
+    },
+    {
+     "bytes": 139,
+     "error": null,
+     "lines": 2,
+     "name": "hw_watchdog.log",
+     "truncated": false
+    },
+    {
+     "bytes": 4002,
+     "error": null,
+     "lines": 46,
+     "name": "serial_armel_dir868l.log",
+     "truncated": false
+    },
+    {
+     "bytes": 2025,
+     "error": null,
+     "lines": 24,
+     "name": "serial_mipseb_wnap320.log",
+     "truncated": false
+    }
+   ],
+   "modules": {
+    "nf_nat_proto_gre.ko": {
+     "errors": 1
+    }
+   },
+   "respawn": {
+    "ntpclient": 24
+   },
+   "truncated": false
+  },
+  "notes": [
+   "ioctl_hints are string-level hints (request names found as text), not observed ioctl calls",
+   "dynamic: hook_register_failed x3: firmadyne: Cannot register character device: watchdog, 0xa, 0x82!",
+   "dynamic: kernel_panic x1: Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)",
+   "dynamic: module_load_failed x1: insmod: can't insert '/lib/modules/nf_nat_proto_gre.ko': unknown symbol in module, or unknown par...",
+   "dynamic: segfault x1: do_page_fault(): sending SIGSEGV to hostapd_tr for invalid read access from 00000004",
+   "FAILING at runtime: gpio, watchdog, mtd, nvram, uart"
+  ],
+  "peripherals": {
+   "gpio": {
+    "evidence": [
+     "event gpio_error x2: kobject_add_internal failed for gpio with -EEXIST, dont try to register things with the same name"
+    ],
+    "status": "failing"
+   },
+   "i2c": {
+    "evidence": [],
+    "status": "not-referenced"
+   },
+   "led": {
+    "evidence": [],
+    "status": "not-referenced"
+   },
+   "mtd": {
+    "evidence": [
+     "runtime /dev/mtd5 errors=1",
+     "runtime /dev/mtdblock/4 errors=1",
+     "event mtd_error x2: mount: mounting /dev/mtdblock/4 on /htdocs/web/js/localization failed: Invalid argument",
+     "firmae: nandsim (empty NAND MTD)"
+    ],
+    "status": "failing"
+   },
+   "nvram": {
+    "evidence": [
+     "runtime /dev/nvram errors=3",
+     "firmae: libnvram (LD_PRELOAD)"
+    ],
+    "status": "failing"
+   },
+   "other": {
+    "evidence": [],
+    "status": "not-referenced"
+   },
+   "spi": {
+    "evidence": [],
+    "status": "not-referenced"
+   },
+   "uart": {
+    "evidence": [
+     "runtime /dev/ttyS1 errors=1",
+     "firmae: QEMU serial port"
+    ],
+    "status": "failing"
+   },
+   "watchdog": {
+    "evidence": [
+     "event watchdog_error x2: Starting watchdog.          Error in opening the device."
+    ],
+    "status": "failing"
+   },
+   "wlan": {
+    "evidence": [],
+    "status": "not-referenced"
+   }
+  },
+  "schema": 1,
+  "static": {
+   "bytes_scanned": 0,
+   "device_nodes": [],
+   "device_paths": {},
+   "elf_files": 0,
+   "ioctl_hints": {},
+   "kernel_modules": [],
+   "limits_hit": [],
+   "scanned_files": 0,
+   "scanned_members": 0,
+   "sys_proc_paths": {},
+   "truncated": false
+  }
+ },
+ "scan": {
+  "hw_binary.log": {
+   "devices": {
+    "/dev/nvram": {
+     "errors": 1
+    }
+   },
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 1,
+     "samples": [
+      "bad utf8  /dev/nvram: No such device"
+     ]
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 41,
+     "error": null,
+     "lines": 1,
+     "name": "hw_binary.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_clean.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 256,
+     "error": null,
+     "lines": 4,
+     "name": "hw_clean.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_gpio.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 2,
+     "samples": [
+      "kobject_add_internal failed for gpio with -EEXIST, dont try to register things with the same name",
+      "sysfs: cannot create duplicate filename '/class/gpio'"
+     ]
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 178,
+     "error": null,
+     "lines": 3,
+     "name": "hw_gpio.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_hook.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 3,
+     "samples": [
+      "firmadyne: Cannot register character device: watchdog, 0xa, 0x82!",
+      "firmadyne: Cannot register character device: wdt, 0xfd, 0x0!",
+      "firmadyne: Cannot create device class: gpio!"
+     ]
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 217,
+     "error": null,
+     "lines": 3,
+     "name": "hw_hook.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_module.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 1,
+     "samples": [
+      "insmod: can't insert '/lib/modules/nf_nat_proto_gre.ko': unknown symbol in module, or unknown parameter"
+     ]
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 206,
+     "error": null,
+     "lines": 2,
+     "name": "hw_module.log",
+     "truncated": false
+    }
+   ],
+   "modules": {
+    "nf_nat_proto_gre.ko": {
+     "errors": 1
+    }
+   },
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_mtd.log": {
+   "devices": {
+    "/dev/mtd5": {
+     "errors": 1
+    },
+    "/dev/mtdblock/4": {
+     "errors": 1
+    }
+   },
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 2,
+     "samples": [
+      "mount: mounting /dev/mtdblock/4 on /htdocs/web/js/localization failed: Invalid argument",
+      "Error Writing device /dev/mtd5."
+     ]
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 176,
+     "error": null,
+     "lines": 3,
+     "name": "hw_mtd.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_nosuch.log": {
+   "devices": {
+    "/dev/nvram": {
+     "errors": 2
+    }
+   },
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 5,
+     "samples": [
+      "/dev/nvram: No such device",
+      "wifia0: WLC_GET_VAR(chanspec): No such device",
+      "ifconfig: SIOCSIFTXQLEN: No such device",
+      "/usr/local/bin/wlanconfig: ioctl: No such device"
+     ]
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 189,
+     "error": null,
+     "lines": 5,
+     "name": "hw_nosuch.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_open.log": {
+   "devices": {
+    "/dev/ttyS1": {
+     "errors": 1
+    }
+   },
+   "events": {
+    "device_open_failed": {
+     "count": 1,
+     "samples": [
+      "/bin/sh: can't open /dev/ttyS1: No such file"
+     ]
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 45,
+     "error": null,
+     "lines": 1,
+     "name": "hw_open.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_panic.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 1,
+     "samples": [
+      "Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)"
+     ]
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 94,
+     "error": null,
+     "lines": 1,
+     "name": "hw_panic.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_respawn.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 993,
+     "error": null,
+     "lines": 13,
+     "name": "hw_respawn.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {
+    "ntpclient": 12
+   },
+   "truncated": false
+  },
+  "hw_segv.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 1,
+     "samples": [
+      "do_page_fault(): sending SIGSEGV to hostapd_tr for invalid read access from 00000004"
+     ]
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 85,
+     "error": null,
+     "lines": 1,
+     "name": "hw_segv.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "hw_watchdog.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 2,
+     "samples": [
+      "Starting watchdog.          Error in opening the device.",
+      "Starting Reset Detect.      Error in opening the device"
+     ]
+    }
+   },
+   "logs": [
+    {
+     "bytes": 139,
+     "error": null,
+     "lines": 2,
+     "name": "hw_watchdog.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "serial_armel_dir868l.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 4002,
+     "error": null,
+     "lines": 46,
+     "name": "serial_armel_dir868l.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {},
+   "truncated": false
+  },
+  "serial_mipseb_wnap320.log": {
+   "devices": {},
+   "events": {
+    "device_open_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "gpio_error": {
+     "count": 0,
+     "samples": []
+    },
+    "hook_register_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "kernel_panic": {
+     "count": 0,
+     "samples": []
+    },
+    "module_load_failed": {
+     "count": 0,
+     "samples": []
+    },
+    "mtd_error": {
+     "count": 0,
+     "samples": []
+    },
+    "no_such_device": {
+     "count": 0,
+     "samples": []
+    },
+    "segfault": {
+     "count": 0,
+     "samples": []
+    },
+    "watchdog_error": {
+     "count": 0,
+     "samples": []
+    }
+   },
+   "logs": [
+    {
+     "bytes": 2025,
+     "error": null,
+     "lines": 24,
+     "name": "serial_mipseb_wnap320.log",
+     "truncated": false
+    }
+   ],
+   "modules": {},
+   "respawn": {
+    "ntpclient": 11
+   },
+   "truncated": false
+  }
+ }
+}

@@ -1129,3 +1129,176 @@ def test_fit_profile_keeps_peripherals_and_top_entries():
     assert p["static"]["limits_hit"] == ["profile_size"]
     small = hp.build_profile(empty_static())
     assert hp.fit_profile(small) == hp.build_profile(empty_static())    # untouched when it fits
+
+
+# ---------------------------------------------------------------- phase 6.2: exec trace
+
+import re  # noqa: E402
+
+from firmae import hwserial  # noqa: E402  (the real parser; tests above use fakes)
+
+SERIAL_FIX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fixtures", "serial")
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_hwserial.json")
+
+
+def _exec(devs=None, tools=None, lines=1, truncated=False):
+    return {"lines": lines, "commands": {},
+            "device_args": {d: {"count": n, "commands": ["cmd"]} for d, n in (devs or {}).items()},
+            "hw_tools": dict(tools or {}), "truncated": truncated}
+
+
+def _status(static, dynamic):
+    return {c: v["status"] for c, v in hp.build_profile(static, dynamic)["peripherals"].items()}
+
+
+def test_profile_of_pre_62_fixtures_is_identical():
+    """build_profile over the older fixtures: same profile as commit ad1aad7."""
+    with open(GOLDEN) as f:
+        golden = json.load(f)
+    merged = hwserial.scan_serial_logs([os.path.join(SERIAL_FIX, n) for n in golden["fixtures"]])
+    prof = hp.build_profile(empty_static(), merged)
+    for entry in prof["dynamic"]["logs"] + golden["profile"]["dynamic"]["logs"]:
+        entry.pop("bytes")                   # line endings of the checkout (see test_hwserial)
+    assert prof == golden["profile"]
+    assert "exec" not in prof["dynamic"] and not any("exec" in n for n in prof["notes"])
+
+
+def test_hw_tool_classes_are_peripherals():
+    assert set(hwserial.HW_TOOLS.values()) <= set(hp.PERIPHERALS)
+    for tool in hwserial.HW_TOOLS:
+        assert re.match(r"[a-z0-9_-]{2,20}\Z", tool)
+
+
+@pytest.mark.parametrize("cls", [c for c in hp.PERIPHERALS if not CLASS_EXAMPLES[c].endswith(".ko")])
+def test_exec_device_arg_alone_is_referenced_never_covered(cls):
+    dev = CLASS_EXAMPLES[cls]
+    p = hp.build_profile(empty_static(), {"devices": {}, "events": {}, "exec": _exec({dev: 4})})
+    per = p["peripherals"][cls]
+    want = "unsupported" if EXPECTED_REFERENCED[cls] == "unsupported" else "referenced"
+    assert per["status"] == want and per["status"] != "covered"
+    assert "runtime-exec: cmd %s x4" % dev in per["evidence"]
+    # the same path as a STATIC reference gives the static status (same classifier)
+    assert hp.classify_path(dev) == cls
+    others = {c for c, v in p["peripherals"].items() if v["status"] != "not-referenced"}
+    assert others == {cls}
+
+
+@pytest.mark.parametrize("tool,cls", sorted(hwserial.HW_TOOLS.items()))
+def test_exec_hw_tool_alone(tool, cls):
+    st = _status(empty_static(), {"exec": _exec(tools={tool: 2})})
+    assert st[cls] == ("unsupported" if cls in ("i2c", "spi") else "referenced")
+    assert sum(v != "not-referenced" for v in st.values()) == 1
+
+
+@pytest.mark.parametrize("cls", [c for c in hp.PERIPHERALS if not CLASS_EXAMPLES[c].endswith(".ko")])
+def test_exec_never_changes_a_static_or_failing_status(cls):
+    dev = CLASS_EXAMPLES[cls]
+    ex = {"exec": _exec({dev: 9})}
+    # referenced/covered/unsupported from the rootfs: unchanged, exec evidence listed last
+    base = hp.build_profile(_static_for(cls), {"devices": {}, "events": {}})["peripherals"][cls]
+    withx = hp.build_profile(_static_for(cls), dict({"devices": {}, "events": {}}, **ex))["peripherals"][cls]
+    assert withx["status"] == base["status"] == EXPECTED_REFERENCED[cls]
+    assert withx["evidence"][0] == base["evidence"][0] and not base["evidence"][0].startswith("runtime-exec")
+    assert "runtime-exec: cmd %s x9" % dev in withx["evidence"]
+    # a runtime failure stays failing, with or without static evidence
+    for static in (_static_for(cls), empty_static()):
+        dyn = dict(_failure_for(cls), **ex)
+        assert hp.build_profile(static, dyn)["peripherals"][cls]["status"] == "failing"
+
+
+def test_exec_ignores_generic_invalid_and_hostile_entries():
+    devs = {"/dev/null": 3, "/dev/pts/1": 3, "/dev/net/tun": 3, "/dev/sda1": 3, "/dev/tty1": 3,
+            "/dev/../dev/i2c-0": 3, "/dev/i2c-0 x": 3, "/dev/i2c-0\x1b[0m": 3, "/sys/class/gpio": 3,
+            "/dev/gpio": 0, "/dev/watchdog": -5}
+    ex = _exec(devs, tools={"i2cget2": 3, "dd": 1, "gpio": True, "watchdog": "7", 5: 1})
+    ex["device_args"]["/dev/mtd0"] = "junk"
+    ex["device_args"]["/dev/mtd1"] = {"count": 2, "commands": "flash_erase"}
+    ex["device_args"]["/dev/mtd2"] = {"count": 1, "commands": ["\x1b[31mevil", "ok;rm", "a" * 65, "fine"]}
+    p = hp.build_profile(empty_static(), {"exec": ex})
+    st = {c: v["status"] for c, v in p["peripherals"].items()}
+    assert {c for c, s in st.items() if s != "not-referenced"} == {"mtd"}
+    assert st["mtd"] == "referenced"
+    assert p["peripherals"]["mtd"]["evidence"][:2] == ["runtime-exec: ? /dev/mtd1 x2",
+                                                       "runtime-exec: fine /dev/mtd2 x1"]
+    for s in all_strings(p):
+        assert is_clean(s)
+
+
+@pytest.mark.parametrize("ex", [None, "x", [], 3, {"device_args": "x", "hw_tools": ["gpio"]},
+                                {"device_args": {"/dev/gpio": None}, "lines": "many"}])
+def test_exec_section_of_wrong_type_does_not_raise(ex):
+    p = hp.build_profile(empty_static(), {"exec": ex})
+    assert all(v["status"] == "not-referenced" for v in p["peripherals"].values())
+
+
+def test_exec_without_hwserial_is_not_used(monkeypatch):
+    monkeypatch.setitem(sys.modules, "firmae.hwserial", None)
+    p = hp.build_profile(empty_static(), {"exec": _exec({"/dev/gpio": 3}, {"gpio": 1})})
+    assert p["peripherals"]["gpio"]["status"] == "not-referenced"
+
+
+def test_exec_evidence_is_bounded_and_ordered_by_count():
+    devs = {"/dev/vendor%03d" % i: i + 1 for i in range(500)}
+    p = hp.build_profile(empty_static(), {"exec": _exec(devs)})
+    ev = p["peripherals"]["other"]["evidence"]
+    assert len(ev) == hp.MAX_EVIDENCE + 1 and ev[-1] == "... and %d more" % (hp.MAX_EXEC_EVIDENCE - hp.MAX_EVIDENCE)
+    assert ev[0] == "runtime-exec: cmd /dev/vendor499 x500"
+
+
+def test_exec_note_only_with_an_exec_section():
+    p = hp.build_profile(empty_static(), {"exec": _exec(lines=7, truncated=True)})
+    notes = [n for n in p["notes"] if n.startswith("dynamic exec:")]
+    assert len(notes) == 1 and "7 command lines" in notes[0] and "(incomplete)" in notes[0]
+    assert "not a successful hardware access" in notes[0]
+
+
+def test_analyze_fixture_profile():
+    dyn = hwserial.scan_serial_log(os.path.join(SERIAL_FIX, "hw_analyze.log"))
+    p = hp.build_profile(empty_static(), dyn)
+    st = {c: v["status"] for c, v in p["peripherals"].items()}
+    assert st == {"i2c": "unsupported", "spi": "not-referenced", "gpio": "referenced",
+                  "watchdog": "referenced", "led": "referenced", "mtd": "failing",
+                  "nvram": "referenced", "uart": "referenced", "wlan": "not-referenced",
+                  "other": "referenced"}
+    mtd = p["peripherals"]["mtd"]["evidence"]
+    assert mtd[0] == "runtime /dev/mtd5 errors=1"       # the real error comes first
+    assert "runtime-exec: mount,event,seama /dev/mtdblock/4 x3" in mtd
+    assert "runtime-exec: flash_erase x1" in mtd
+    assert p["peripherals"]["gpio"]["evidence"][:3] == [
+        "runtime-exec: cat /dev/gpio x1", "runtime-exec: gpioset /dev/gpiochip0 x1", "runtime-exec: gpioset x1"]
+    assert not any("/dev/net" in e for v in p["peripherals"].values() for e in v["evidence"])
+    for s in all_strings(p):
+        assert is_clean(s)
+
+
+def test_exec_device_args_are_trimmed_by_fit_profile():
+    ex = _exec({"/dev/v%04d" % i: i + 1 for i in range(200)})
+    p = hp.build_profile(empty_static(), {"exec": ex})
+    peripherals = json.loads(json.dumps(p["peripherals"]))
+    hp.fit_profile(p, 9000)
+    assert len(hp._dumps(p)) <= 9000 and p["peripherals"] == peripherals
+    assert "/dev/v0199" in p["dynamic"]["exec"]["device_args"]
+
+
+def test_cli_update_with_an_analyze_log(tmp_path):
+    out = tmp_path / "hw.json"
+    assert hp.main(["--tar", _tar(tmp_path), "--out", str(out)]) == 0
+    before = json.loads(out.read_text())
+    log = os.path.join(SERIAL_FIX, "hw_analyze.log")
+    assert hp.main(["--update", "--out", str(out), "--serial-log", log]) == 0
+    prof = json.loads(out.read_text())
+    assert prof["static"] == before["static"] and prof["schema"] == 1
+    assert prof["dynamic"]["exec"]["lines"] == 27
+    st = {c: v["status"] for c, v in prof["peripherals"].items()}
+    # static statuses are kept (nvram/uart covered, gpio referenced); the panic
+    # and the mtd write error come from the log, exec adds i2c/led/watchdog/other
+    assert st["nvram"] == "covered" and st["uart"] == "covered" and st["gpio"] == "referenced"
+    assert st["mtd"] == "failing" and st["i2c"] == "unsupported" and st["led"] == "referenced"
+
+
+def test_cli_help_shows_the_analyze_command(capsys):
+    assert hp.main(["--help"]) == 0
+    text = capsys.readouterr().out
+    assert "--update --out scratch/<IID>/hw_profile.json" in text
+    assert "--serial-log scratch/<IID>/qemu.final.serial.log" in text
+    assert "--tar" not in text.split("analyze mode:", 1)[1]

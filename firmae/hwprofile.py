@@ -7,6 +7,18 @@ and which of them can FirmAE's generic emulation not provide?
     python3 -m firmae.hwprofile --update --out scratch/<IID>/hw_profile.json
                                 --serial-log <log> [--serial-log <log> ...]
 
+Analyze mode (command-line trace). The pipeline profiles the serial logs of
+the check run only. scratch/<IID>/run_analyze.sh (`-a`) boots with
+`firmadyne.syscall=32`, which logs every execve ("[ANALYZE] ..." lines, see
+firmae.hwserial), and writes them to qemu.final.serial.log, replacing the log
+of the check run. To fold that trace into an existing profile, after the
+analyze run (--update keeps the static section; --tar is not allowed with
+it; the dynamic section is rebuilt from exactly the logs given):
+
+    python3 -m firmae.hwprofile --update --out scratch/<IID>/hw_profile.json \\
+        --serial-log scratch/<IID>/qemu.initial.serial.log \\
+        --serial-log scratch/<IID>/qemu.final.serial.log
+
 Static part (this module, `scan_tarball`): the rootfs tarball is read as a
 stream, member by member, and the content of every regular file is searched
 for "/dev/...", "/sys/...", "/proc/..." strings and for ioctl request names.
@@ -90,6 +102,15 @@ Status of a peripheral class, in this order of precedence:
   "unsupported"     referenced, and FirmAE has no counterpart (i2c, spi);
                     never presented as working;
   "referenced"      referenced, no runtime error seen (or no log at all).
+
+dynamic["exec"] (analyze-mode command lines, only present when the log has
+them) is weaker evidence, kept apart ("runtime-exec: <commands> <dev> xN",
+"runtime-exec: <tool> xN"): /dev arguments are classified with classify_path
+(PATH_RULES, as for static references; re-validated with
+firmae.hwserial.exec_device_arg), tools with firmae.hwserial.HW_TOOLS. A class
+with ONLY such evidence is "referenced" ("unsupported" for i2c/spi), never
+"covered"; it never turns a status into "failing" and never replaces one, and
+it is listed after all other evidence.
 """
 
 import argparse
@@ -866,12 +887,61 @@ def _paths_in(text):
             yield raw.decode("ascii").rstrip("./")
 
 
+MAX_EXEC_EVIDENCE = 50            # exec entries turned into evidence (by count)
+_EXEC_CMD_RX = re.compile(r"[A-Za-z0-9_.+-]{1,64}\Z")
+
+
+def _exec_tools():
+    """(HW_TOOLS, exec_device_arg) of firmae.hwserial, or ({}, None)."""
+    try:
+        from firmae.hwserial import HW_TOOLS as tools, exec_device_arg as check
+    except Exception:           # ImportError (missing, older or fake hwserial), broken module
+        return {}, None
+    return (tools if isinstance(tools, dict) else {}), (check if callable(check) else None)
+
+
+def _exec_evidence(ex, exec_refs, notes):
+    """Evidence from dynamic["exec"] (analyze-mode command lines). /dev
+    arguments are classified with classify_path, the same rules as the static
+    references; HW_TOOLS gives the class of a tool. Only exec_refs is
+    filled: this evidence can never make a class "covered" or "failing"."""
+    if not ex:
+        return
+    tools, check = _exec_tools()
+    devs = []
+    for dev, info in _dict(ex, "device_args").items():
+        if check is None or not isinstance(dev, str) or check(dev) != dev:
+            continue
+        cls = classify_path(dev)
+        if cls not in exec_refs:                       # IGNORE / not /dev
+            continue
+        n = _int(info.get("count")) if isinstance(info, dict) else 0
+        if not n:
+            continue
+        cmds = [c for c in _list(info, "commands") if isinstance(c, str) and _EXEC_CMD_RX.match(c)][:3]
+        devs.append((-n, dev, cls, cmds))
+    for n, dev, cls, cmds in sorted(devs)[:MAX_EXEC_EVIDENCE]:
+        exec_refs[cls].append(((5, n, dev), "runtime-exec: %s %s x%d" % (",".join(cmds) or "?", dev, -n)))
+    hw = []
+    for tool, n in _dict(ex, "hw_tools").items():
+        cls = tools.get(tool) if isinstance(tool, str) else None
+        if cls in exec_refs and _int(n):
+            hw.append((-_int(n), tool, cls))
+    for n, tool, cls in sorted(hw)[:MAX_EXEC_EVIDENCE]:
+        exec_refs[cls].append(((6, n, tool), "runtime-exec: %s x%d" % (tool, -n)))
+    notes.append("dynamic exec: %d command lines from the analyze-mode trace ([ANALYZE] lines)%s; "
+                 "'runtime-exec' evidence is a command line the guest ran or printed, not a "
+                 "successful hardware access" % (_int(ex.get("lines")),
+                                                 " (incomplete)" if ex.get("truncated") else ""))
+
+
 def build_profile(static, dynamic=None):
     """The full profile: schema, static, dynamic, peripherals, notes."""
     static = _clean(static) if isinstance(static, dict) else {}
     dynamic = _clean(dynamic) if isinstance(dynamic, dict) else None
     refs = {c: [] for c in PERIPHERALS}      # (sort key, text)
     fails = {c: [] for c in PERIPHERALS}
+    exec_refs = {c: [] for c in PERIPHERALS}  # analyze-mode command lines only
     notes = [NOTE_IOCTL]
 
     for section in ("device_paths", "sys_proc_paths"):
@@ -923,6 +993,7 @@ def build_profile(static, dynamic=None):
                 module_fail = True
             else:
                 refs[cls].append(((4, 0, name), "runtime module %s (no errors)" % name))
+        _exec_evidence(_dict(dynamic, "exec"), exec_refs, notes)
         events = _dict(dynamic, "events")
         for kind in sorted(events):
             ev = events[kind]
@@ -962,9 +1033,14 @@ def build_profile(static, dynamic=None):
             status = "failing"
         elif refs[cls]:
             status = status_if_ref
+        elif exec_refs[cls]:
+            # a command line alone: at most "referenced", never "covered";
+            # i2c/spi stay "unsupported" (used, and FirmAE has nothing for them)
+            status = "unsupported" if status_if_ref == "unsupported" else "referenced"
         else:
             status = "not-referenced"
-        items = [t for _, t in sorted(set(fails[cls]))] + [t for _, t in sorted(set(refs[cls]))]
+        items = ([t for _, t in sorted(set(fails[cls]))] + [t for _, t in sorted(set(refs[cls]))]
+                 + [t for _, t in sorted(set(exec_refs[cls]))])
         evidence = items[:MAX_EVIDENCE]
         if len(items) > MAX_EVIDENCE:
             evidence.append("... and %d more" % (len(items) - MAX_EVIDENCE))
@@ -1192,8 +1268,15 @@ def _summary(profile, out, elapsed):
 
 
 def _parser():
-    p = argparse.ArgumentParser(prog="python3 -m firmae.hwprofile",
-                                description="Hardware dependency profile of a firmware rootfs.")
+    p = argparse.ArgumentParser(
+        prog="python3 -m firmae.hwprofile",
+        description="Hardware dependency profile of a firmware rootfs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="analyze mode: after scratch/<IID>/run_analyze.sh, fold its command-line trace "
+               "([ANALYZE] lines,\nwritten to qemu.final.serial.log) into the profile:\n"
+               "  python3 -m firmae.hwprofile --update --out scratch/<IID>/hw_profile.json \\\n"
+               "      --serial-log scratch/<IID>/qemu.initial.serial.log \\\n"
+               "      --serial-log scratch/<IID>/qemu.final.serial.log")
     p.add_argument("--tar", help="rootfs tarball (images/<IID>.tar.gz)")
     p.add_argument("--out", required=True, help="profile JSON to write")
     p.add_argument("--serial-log", action="append", default=[], metavar="LOG",

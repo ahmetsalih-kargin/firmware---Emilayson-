@@ -437,3 +437,256 @@ def test_real_trace_shape_is_strict(tmp_path):
     # near-trace lines do not feed respawn either
     lines = ["xx firmadyne: sys_socket[PID: %d (spoof)]: y" % i for i in range(30)]
     assert run(tmp_path, lines)["respawn"] == {}
+
+
+# ---------------------------------------------------------------- phase 6.2: exec trace
+
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_hwserial.json")
+
+
+def _no_bytes(res):
+    """`logs[].bytes` depends on the checkout's line endings (hw_watchdog.log is
+    CRLF under Windows autocrlf); everything else must be identical."""
+    res = json.loads(json.dumps(res))
+    for entry in res["logs"]:
+        entry.pop("bytes")
+    return res
+
+
+def test_pre_62_fixtures_give_identical_results():
+    """Output of commit ad1aad7 (before the exec trace) for every older fixture."""
+    with open(GOLDEN) as f:
+        golden = json.load(f)
+    names = sorted(n for n in os.listdir(FIX) if n.endswith(".log") and n != "hw_analyze.log")
+    assert names == golden["fixtures"]
+    for n in names:
+        res = scan_serial_log(fx(n))
+        assert "exec" not in res
+        assert _no_bytes(res) == _no_bytes(golden["scan"][n]), n
+        assert res["logs"][0]["bytes"] == os.path.getsize(fx(n))
+    merged = scan_serial_logs([fx(n) for n in names])
+    assert _no_bytes(merged) == _no_bytes(golden["merged"])
+
+
+ANALYZE_EXEC = {
+    "lines": 27,
+    "commands": {"Kernel": 1, "awk": 1, "cat": 3, "dd": 1, "echo": 2, "event": 2, "flash_erase": 1,
+                 "gpioset": 1, "i2cdetect": 1, "i2cdump": 1, "init": 1, "ledctrl": 1, "mkdir": 2,
+                 "modprobe": 2, "mount": 2, "seama": 1, "sh": 2, "xmldbc": 1},
+    "device_args": {
+        "/dev/b": {"count": 1, "commands": ["cat"]},
+        "/dev/gpio": {"count": 1, "commands": ["cat"]},
+        "/dev/gpiochip0": {"count": 1, "commands": ["gpioset"]},
+        "/dev/led1": {"count": 1, "commands": ["ledctrl"]},
+        "/dev/mtd12": {"count": 1, "commands": []},
+        "/dev/mtd3": {"count": 1, "commands": ["dd"]},
+        "/dev/mtd5": {"count": 2, "commands": ["sh", "flash_erase"]},
+        "/dev/mtdblock/4": {"count": 3, "commands": ["mount", "event", "seama"]},
+        "/dev/net": {"count": 1, "commands": ["mkdir"]},
+        "/dev/nvram": {"count": 1, "commands": ["echo"]},
+        "/dev/ttyS1": {"count": 1, "commands": ["cat"]},
+        "/dev/watchdog": {"count": 1, "commands": ["cat"]},
+    },
+    "hw_tools": {"flash_erase": 1, "gpioset": 1, "i2cdetect": 1, "i2cdump": 1, "ledctrl": 1},
+    "truncated": True,           # the 5000-byte line was clipped at MAX_LINE_BYTES
+}
+
+
+def test_analyze_fixture_exact_exec_section():
+    res = scan_serial_log(fx("hw_analyze.log"))
+    assert res["exec"] == ANALYZE_EXEC
+    assert res["logs"][0]["truncated"] is True and res["truncated"] is True
+
+
+def test_analyze_fixture_hostile_lines_add_nothing():
+    ex = scan_serial_log(fx("hw_analyze.log"))["exec"]
+    devs = set(ex["device_args"])
+    # envp lines, continuation lines, mid-line / malformed prefixes, redirection
+    # targets, traversal, unbalanced quotes, benign pseudo devices, clipped tails
+    for bad in ("/dev/i2c-0", "/dev/spidev0.0", "/dev/i2c-1", "/dev/i2c-2", "/dev/i2c-3",
+                "/dev/i2c-4", "/dev/i2c-5", "/dev/i2c-6", "/dev/i2c-7", "/dev/i2c-9",
+                "/dev/watchdog2", "/dev/led0", "/dev/mtd7", "/dev/mtd8", "/dev/mtd9",
+                "/dev/mtd10", "/dev/mtd11", "/dev/mtd0", "/dev/mtd1", "/dev/null", "/dev/zero",
+                "/dev/console", "/dev/tty", "/dev/tty1", "/dev/ttyp0", "/dev/pts", "/dev/pts/0",
+                "/dev/urandom", "/dev/x", "/dev/my"):
+        assert bad not in devs, bad
+    assert not any(".." in d or "/etc/" in d or "'" in d or '"' in d or "$" in d for d in devs)
+    assert not any(c.startswith(("i2cget", "i2cset")) for c in ex["commands"])
+    assert "envp:" not in ex["commands"] and "HOME" not in "".join(ex["commands"])
+    for name in list(ex["commands"]) + [c for v in ex["device_args"].values() for c in v["commands"]]:
+        assert 1 <= len(name) <= 64 and all(ch.isalnum() or ch in "_.+-" for ch in name)
+
+
+def test_analyze_fixture_events():
+    res = scan_serial_log(fx("hw_analyze.log"))
+    # "event WPS.ERROR ... /var/gpio_ctrl" and "echo cannot open /dev/nvram" are
+    # command lines, not errors; the panic printed as a command still counts
+    assert counts(res) == {"device_open_failed": 0, "no_such_device": 0, "hook_register_failed": 0,
+                           "module_load_failed": 0, "segfault": 0, "kernel_panic": 1, "mtd_error": 1,
+                           "watchdog_error": 0, "gpio_error": 0}
+    assert res["devices"] == {"/dev/mtd5": {"errors": 1}}
+    assert res["respawn"] == {} and res["modules"] == {}
+
+
+def test_exec_lines_are_exempt_from_generic_kinds_only(tmp_path):
+    pre = "[ANALYZE] [PID: 1 (sh)]: "
+    body = ["echo cannot open /dev/foo", "echo /dev/nvram: No such device", "echo gpio failed",
+            "echo mtd error", "echo watchdog error"]
+    assert sum(counts(run(tmp_path, body)).values()) == 5     # without the prefix: five events
+    res = run(tmp_path, [pre + b for b in body])
+    assert sum(counts(res).values()) == 0 and res["devices"] == {}
+    res = run(tmp_path, [pre + "Kernel panic - x", pre + "sending SIGSEGV to y",
+                         pre + "insmod: can't insert 'evil.ko': x"])
+    c = counts(res)
+    assert c["kernel_panic"] == 1 and c["segfault"] == 1 and c["module_load_failed"] == 1
+    assert res["exec"]["lines"] == 3 and "evil.ko" in res["modules"]
+
+
+def test_exec_absent_without_exec_lines_present_with_any(tmp_path):
+    assert "exec" not in run(tmp_path, ["[ANALYZE] mid", "x [ANALYZE] [PID: 1 (a)]: ls"])
+    res = run(tmp_path, ["[ANALYZE] [PID: 1 (a)]: "])
+    assert res["exec"] == {"lines": 1, "commands": {}, "device_args": {}, "hw_tools": {},
+                           "truncated": False}
+
+
+@pytest.mark.parametrize("token,dev", [
+    ("/dev/mtd0", "/dev/mtd0"), ("/dev/mtdblock/4", "/dev/mtdblock/4"), ("/dev/gpio/", "/dev/gpio"),
+    ("'/dev/i2c-0'", "/dev/i2c-0"), ('"/dev/spidev0.1"', "/dev/spidev0.1"),
+    ("if=/dev/mtd2", "/dev/mtd2"), ("of=/dev/mtd3", "/dev/mtd3"), ("/dev/ttyS0", "/dev/ttyS0"),
+    ("/dev/ttyUSB0", "/dev/ttyUSB0"), ("/dev/ttyAMA1", "/dev/ttyAMA1"),
+    ("/dev/a/b/c/d/e", "/dev/a/b/c/d/e"),
+    ("/dev/../etc/shadow", None), ("/dev/./mtd0", None), ("/dev/mtd/../x", None), ("/dev//mtd1", None),
+    ("/dev/", None), ("/dev", None), ("/devx/mtd0", None), ("x/dev/mtd0", None), ("'/dev/x\"", None),
+    ('"/dev/my', None), ("/dev/a b", None), ("/dev/a$b", None), ("/dev/a/b/c/d/e/f", None),
+    ("/dev/" + "a" * 41, None), ("/dev/null", None), ("/dev/zero", None), ("/dev/console", None),
+    ("/dev/tty", None), ("/dev/tty3", None), ("/dev/ttyp0", None), ("/dev/pts", None),
+    ("/dev/pts/2", None), ("/dev/urandom", None), ("/dev/fd/1", None), ("of=/dev/null", None),
+    (None, None), (b"/dev/mtd0", None), ("/dev/mtd0" + "/x" * 200, None),
+])
+def test_exec_device_arg(token, dev):
+    assert hwserial.exec_device_arg(token) == dev
+
+
+def test_exec_redirection_targets_are_not_device_args(tmp_path):
+    res = run(tmp_path, ["[ANALYZE] [PID: 1 (sh)]: cmd > /dev/mtd1 >> /dev/mtd2 < /dev/mtd3 "
+                         "2> /dev/mtd4 2>> /dev/mtd5 &> /dev/mtd6 >| /dev/mtd7 "
+                         ">/dev/mtd9 2>/dev/mtd10 /dev/mtd11"])
+    assert set(res["exec"]["device_args"]) == {"/dev/mtd11"}
+    # "2>&1" becomes "2>" "1": only the "1" is skipped, the next argument counts
+    res = run(tmp_path, ["[ANALYZE] [PID: 1 (sh)]: cmd 2>&1 /dev/mtd8"])
+    assert set(res["exec"]["device_args"]) == {"/dev/mtd8"}
+
+
+def test_exec_busybox_applet_and_separators(tmp_path):
+    res = run(tmp_path, ["[ANALYZE] [PID: 1 (sh)]: /bin/busybox flash_erase /dev/mtd1 0 0",
+                         "[ANALYZE] [PID: 2 (sh)]: busybox",
+                         "[ANALYZE] [PID: 3 (sh)]: umount /dev/mtd2;cat /dev/mtd3|grep x&&ls (/dev/mtd4)"])
+    ex = res["exec"]
+    assert ex["commands"] == {"flash_erase": 1, "busybox": 1, "umount": 1}
+    assert ex["hw_tools"] == {"flash_erase": 1}
+    assert set(ex["device_args"]) == {"/dev/mtd1", "/dev/mtd2", "/dev/mtd3", "/dev/mtd4"}
+
+
+def test_exec_device_counted_once_per_line_commands_bounded(tmp_path):
+    lines = ["[ANALYZE] [PID: %d (sh)]: tool%d /dev/mtd0 /dev/mtd0 /dev/mtd0" % (i, i) for i in range(10)]
+    entry = run(tmp_path, lines)["exec"]["device_args"]["/dev/mtd0"]
+    assert entry == {"count": 10, "commands": ["tool0", "tool1", "tool2"]}
+
+
+def test_exec_kernel_cap_drops_the_last_token(tmp_path):
+    def line(total):
+        pre = "[ANALYZE] [PID: 1 (sh)]: cat "
+        return pre + "x" * (total - len(pre) - len(" /dev/mtd1")) + " /dev/mtd1"
+    assert len(line(399)) == 399 and len(line(400)) == 400
+    assert "/dev/mtd1" in run(tmp_path, [line(399)])["exec"]["device_args"]
+    assert run(tmp_path, [line(400)])["exec"]["device_args"] == {}
+    # a line clipped at MAX_LINE_BYTES: the partial last token is not used either
+    head = "[ANALYZE] [PID: 1 (sh)]: cat /dev/mtd2 "
+    big = head + "y" * (hwserial.MAX_LINE_BYTES - len(head) - len(" /dev/mtd9")) + " /dev/mtd9"
+    assert len(big) == hwserial.MAX_LINE_BYTES          # what is kept ends in a valid "/dev/mtd9"
+    res = run(tmp_path, [big + "9999"])
+    assert res["logs"][0]["truncated"] is True
+    assert set(res["exec"]["device_args"]) == {"/dev/mtd2"}
+
+
+def test_exec_tables_are_capped(tmp_path):
+    lines = ["[ANALYZE] [PID: %d (sh)]: cmd%d /dev/d%d /dev/e%d" % (i, i, i, i) for i in range(3000)]
+    res = run(tmp_path, lines)
+    ex = res["exec"]
+    assert ex["lines"] == 3000
+    assert len(ex["commands"]) == hwserial.MAX_EXEC_COMMANDS
+    assert len(ex["device_args"]) == hwserial.MAX_EXEC_DEVICES
+    assert ex["truncated"] is True
+    assert res["truncated"] is False and res["logs"][0]["truncated"] is False   # top level unchanged
+    # the tables keep the first names; counting of known names goes on
+    res = run(tmp_path, lines + ["[ANALYZE] [PID: 1 (sh)]: cmd0 /dev/d0"] * 5)
+    assert res["exec"]["commands"]["cmd0"] == 6 and res["exec"]["device_args"]["/dev/d0"]["count"] == 6
+
+
+def test_exec_overflow_flag_each_table_alone(tmp_path):
+    def ex_for(lines):
+        res = run(tmp_path, lines)
+        assert res["truncated"] is False
+        return res["exec"]
+    # exactly at the caps: nothing dropped, not truncated
+    ex = ex_for(["[ANALYZE] [PID: 1 (sh)]: c /dev/d%d" % i for i in range(hwserial.MAX_EXEC_DEVICES)])
+    assert len(ex["device_args"]) == hwserial.MAX_EXEC_DEVICES and ex["truncated"] is False
+    ex = ex_for(["[ANALYZE] [PID: 1 (sh)]: cmd%d" % i for i in range(hwserial.MAX_EXEC_COMMANDS)])
+    assert len(ex["commands"]) == hwserial.MAX_EXEC_COMMANDS and ex["truncated"] is False
+    # one past the device cap, a single command name: only device_args overflows
+    ex = ex_for(["[ANALYZE] [PID: 1 (sh)]: c /dev/d%d" % i for i in range(hwserial.MAX_EXEC_DEVICES + 1)])
+    assert list(ex["commands"]) == ["c"] and len(ex["device_args"]) == hwserial.MAX_EXEC_DEVICES
+    assert ex["truncated"] is True
+    # one past the command cap, no device arguments: only commands overflows
+    ex = ex_for(["[ANALYZE] [PID: 1 (sh)]: cmd%d" % i for i in range(hwserial.MAX_EXEC_COMMANDS + 1)])
+    assert ex["device_args"] == {} and len(ex["commands"]) == hwserial.MAX_EXEC_COMMANDS
+    assert ex["truncated"] is True
+
+
+def test_exec_hw_tools_whitelist(tmp_path):
+    lines = ["[ANALYZE] [PID: 1 (sh)]: %s x" % t for t in sorted(hwserial.HW_TOOLS)]
+    lines += ["[ANALYZE] [PID: 1 (sh)]: %s x" % t for t in ("i2cget2", "spidev", "gpio-keys", "dd", "flash")]
+    ex = run(tmp_path, lines)["exec"]
+    assert ex["hw_tools"] == {t: 1 for t in hwserial.HW_TOOLS}
+
+
+def test_exec_prefix_is_strict(tmp_path):
+    for bad in ("x[ANALYZE] [PID: 1 (sh)]: i2cget", "[ANALYZE]  [PID: 1 (sh)]: i2cget",
+                "[ANALYZE] [PID: 1 (sh)] : i2cget", "[ANALYZE] [PID: (sh)]: i2cget",
+                "[ANALYZE] [PID: 12345678901 (sh)]: i2cget", "[ANALYZE] [PID: 1 (%s)]: i2cget" % ("n" * 33),
+                "[ANALYZE] [PID: 1 (a)b)]: i2cget", "[ANALYZE] [pid: 1 (sh)]: i2cget",
+                "[   1.000] [ANALYZE] [PID: 1 (sh)]: i2cget",
+                "[ANALYZE] [PID: x (sh)]: [ANALYZE] [PID: 1 (sh)]: i2cget",
+                "[ANALYZE] [PID: 1 (sh)]:[ANALYZE] [PID: 1 (sh)]: i2cget"):
+        assert "exec" not in run(tmp_path, [bad]), bad
+    for good in ("[ANALYZE] [PID: 1 ()]: i2cget", "[ANALYZE] [PID: 1 (kworker/u2:1)]: i2cget",
+                 "[ANALYZE] [PID: 1 (a b [c])]: i2cget", "\x1b[0m[ANALYZE] [PID: 1 (sh)]: i2cget\r"):
+        assert run(tmp_path, [good])["exec"]["hw_tools"] == {"i2cget": 1}, good
+
+
+def test_exec_merged_over_logs_and_marked_when_a_log_is_cut(tmp_path, monkeypatch):
+    p = write(tmp_path, "a.log", b"[ANALYZE] [PID: 1 (sh)]: flash_erase /dev/mtd1 0 0\n" * 4)
+    res = scan_serial_logs([p, p])
+    assert res["exec"]["lines"] == 8 and res["exec"]["device_args"]["/dev/mtd1"]["count"] == 8
+    assert res["exec"]["truncated"] is False
+    monkeypatch.setattr(hwserial, "MAX_LOG_BYTES", 100)
+    res = scan_serial_log(p)
+    assert res["truncated"] is True and res["exec"]["truncated"] is True
+
+
+def test_exec_deterministic_and_json_clean():
+    a = json.dumps(scan_serial_log(fx("hw_analyze.log")), sort_keys=True)
+    assert a == json.dumps(scan_serial_log(fx("hw_analyze.log")), sort_keys=True)
+    assert all(0x20 <= ord(ch) <= 0x7e for ch in a)
+
+
+def test_exec_hostile_volume_is_fast(tmp_path):
+    toks = " ".join("/dev/x%d" % i for i in range(70))
+    unit = ("[ANALYZE] [PID: 1 (sh)]: flash_erase %s > /dev/null 2>&1 'q\" ;|&()`\n" % toks).encode()
+    data = unit * (16 * 1024 * 1024 // len(unit))
+    p = write(tmp_path, "v.log", data)
+    t = time.time()
+    res = scan_serial_log(p)
+    assert time.time() - t < 10.0                     # 64 MiB budget: about 4x this
+    assert res["exec"]["lines"] == len(data) // len(unit)
+    assert len(res["exec"]["device_args"]) <= hwserial.MAX_EXEC_DEVICES
