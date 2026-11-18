@@ -49,6 +49,13 @@ class Initializer:
         if (hasattr(os, "geteuid") and os.geteuid() == 0) or \
                 os.environ.get("FIRMAE_CHROME_NO_SANDBOX") == "1":
             options.add_argument("--no-sandbox")
+        # FIRMAE_BROWSER_USER (analyses/browser_user.sh): the profile lives in the
+        # per-run 0700 directory of that user, not in a shared default location
+        profile = os.environ.get("FIRMAE_BROWSER_PROFILE_DIR", "")
+        if profile:
+            if not os.path.isabs(profile):
+                raise SystemExit("FIRMAE_BROWSER_PROFILE_DIR must be an absolute path")
+            options.add_argument("--user-data-dir=" + profile)
         options.add_argument("--screen-size=1200x600")
         self.driver = webdriver.Chrome(options=options)
         if self.auth:

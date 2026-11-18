@@ -95,6 +95,25 @@ pip_user install psycopg2 psycopg2-binary
 
 sudo apt install -y busybox-static bash-static fakeroot dmsetup kpartx netcat-openbsd nmap python3-psycopg2 snmp uml-utilities util-linux vlan iptables
 
+# BEGIN unprivileged-users
+# Optional (SECURITY.md S9, S11): dedicated system users for the firmware
+# extractor and for the headless Chrome of the analyses. Not created by default;
+# opt in with   FIRMAE_CREATE_USERS=1 ./install.sh
+# and use them with
+#   export FIRMAE_EXTRACT_USER=firmae-extract FIRMAE_BROWSER_USER=firmae-browser
+# (setpriv comes with util-linux, installed above). Both users need read access
+# to the Python modules they import (binwalk, magic, psycopg2 / selenium) and
+# firmae-browser to the analyses/ directory.
+if [ "${FIRMAE_CREATE_USERS:-0}" = 1 ]; then
+    for firmae_user in firmae-extract firmae-browser; do
+        if ! getent passwd "$firmae_user" >/dev/null; then
+            sudo useradd --system --user-group --no-create-home --home-dir /nonexistent \
+                --shell /usr/sbin/nologin "$firmae_user"
+        fi
+    done
+fi
+# END unprivileged-users
+
 # for binwalk (clean up the download afterwards only if this run created it)
 BINWALK_CLEANUP=0
 if [ ! -e v2.3.4.tar.gz ] && [ ! -e binwalk-2.3.4 ]; then

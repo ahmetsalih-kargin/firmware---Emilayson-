@@ -12,13 +12,87 @@ import multiprocessing
 import os
 import shutil
 import signal
+import stat
 import sys
+import tarfile
 import tempfile
 import traceback
 import pathlib
 
 import magic
 import binwalk
+
+
+def binwalk_args():
+    """Options of binwalk.scan(). As root, binwalk refuses to run third-party
+    extraction utilities unless --run-as names a user, and its own default
+    ('nobody') cannot write the 0700 temporary directory: FirmAE passes
+    --run-as=root. Not as root (FIRMAE_EXTRACT_USER, SECURITY.md S9) the
+    utilities run as the current user, and --run-as=root would make binwalk
+    refuse to start ("must be run with root privileges")."""
+    args = ["--preserve-symlinks", "-e", "-r"]
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        args.insert(0, "--run-as=root")
+    return args
+
+
+def archive_rootfs(base_name, root_dir):
+    """images/<tag>.tar.gz from the extracted root filesystem.
+
+    As root: shutil.make_archive, unchanged. Not as root, entries the owner
+    cannot read (mode 000 files, directories without r-x) would make the archive
+    fail; they are given the owner's read (and search) bit for the time of the
+    archiving only, and the tarball records the original mode. Everything else
+    is what make_archive writes: the same member names ("." and "./<path>"),
+    order, types, hard links and gzip stream."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return shutil.make_archive(base_name, "gztar", root_dir=root_dir)
+    modes = _make_readable(root_dir)
+
+    def restore(tarinfo):
+        mode = modes.get(tarinfo.name)
+        if mode is not None:
+            tarinfo.mode = mode
+        return tarinfo
+    archive = base_name + ".tar.gz"
+    with tarfile.open(archive, "w|gz") as tar:
+        tar.add(root_dir, arcname=".", filter=restore)
+    return archive
+
+
+def _make_readable(root_dir):
+    """Give the owner r (files) / r-x (directories) where missing; returns
+    {arcname: original mode} of what was changed. Symlinks are never followed
+    or changed. Iterative: firmware trees can be deep."""
+    modes = {}
+    stack = [(root_dir, ".")]
+    while stack:
+        path, arc = stack.pop()
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            continue
+        isdir = stat.S_ISDIR(st.st_mode)
+        need = stat.S_IRUSR | (stat.S_IXUSR if isdir else 0)
+        if not (isdir or stat.S_ISREG(st.st_mode)):
+            continue
+        if st.st_mode & need != need:
+            try:
+                os.chmod(path, stat.S_IMODE(st.st_mode) | need)
+                modes[arc] = stat.S_IMODE(st.st_mode)
+            except OSError:
+                pass
+        if isdir:
+            try:
+                names = os.listdir(path)
+            except OSError:
+                continue
+            for name in names:
+                stack.append((os.path.join(path, name), os.path.join(arc, name)))
+    return modes
+
 
 class Extractor(object):
     """
@@ -37,7 +111,12 @@ class Extractor(object):
     visited_lock = multiprocessing.Lock()
 
     def __init__(self, indir, outdir=None, rootfs=True, kernel=True,
-                 numproc=True, server=None, brand=None, debug=False):
+                 numproc=True, server=None, brand=None, debug=False, done=None):
+        # Output file names (e.g. "12.tar.gz") that count as already extracted
+        # although they are not in output_dir: the final images/ directory when
+        # the extractor writes into a staging directory (--done-list).
+        self.done = frozenset(done or ())
+
         # Input firmware update file or directory
         self._input = os.path.abspath(indir)
         # Output firmware directory
@@ -337,11 +416,11 @@ class ExtractionItem(object):
         """
         Updates the status flags using the tag to determine completion status.
         """
-        kernel_done = os.path.isfile(self.get_kernel_path()) \
+        kernel_done = self._output_exists(self.get_kernel_path()) \
             if self.extractor.do_kernel and self.output \
             else not self.extractor.do_kernel
 
-        rootfs_done = os.path.isfile(self.get_rootfs_path()) \
+        rootfs_done = self._output_exists(self.get_rootfs_path()) \
             if self.extractor.do_rootfs and self.output \
             else not self.extractor.do_rootfs
 
@@ -356,6 +435,9 @@ class ExtractionItem(object):
             self.update_database("rootfs_extracted", "True")
 
         return self.get_status()
+
+    def _output_exists(self, path):
+        return os.path.isfile(path) or os.path.basename(path) in self.extractor.done
 
     UPDATABLE_FIELDS = ("kernel_extracted", "rootfs_extracted", "kernel_version")
 
@@ -477,8 +559,8 @@ class ExtractionItem(object):
                                   self.extractor.do_kernel,
                                   self.extractor.do_rootfs))
 
-            for module in binwalk.scan(self.item, "--run-as=root", "--preserve-symlinks",
-                    "-e", "-r", "-C", self.temp, signature=True, quiet=True):
+            for module in binwalk.scan(self.item, *binwalk_args(),
+                    "-C", self.temp, signature=True, quiet=True):
                 prev_entry = None
                 for entry in module.results:
                     desc = entry.description
@@ -707,8 +789,7 @@ class ExtractionItem(object):
 
                     self.printf(">>>> Found Linux filesystem in %s!" % unix[1])
                     if self.output:
-                        shutil.make_archive(self.output, "gztar",
-                                            root_dir=unix[1])
+                        archive_rootfs(self.output, unix[1])
                     else:
                         self.extractor.do_rootfs = False
                     return True
@@ -810,6 +891,9 @@ def main():
                         help="Brand of the firmware image")
     parser.add_argument("-d", dest="debug", action="store_true", default=False,
                         help="Print debug information")
+    parser.add_argument("--done-list", dest="done_list", action="store", default=None,
+                        help="File with output names (one per line, e.g. 12.tar.gz) \
+                        that are already extracted elsewhere")
     arg = parser.parse_args()
 
     if arg.input == arg.output:
@@ -824,10 +908,24 @@ def main():
     if not (arg.debug or psql_check(arg.sql)):
         return 1
 
+    if arg.done_list and hasattr(os, "geteuid") and os.geteuid() != 0:
+        # Measured (WP-B2 phase 2): as root the extraction tools write the
+        # image's modes as they are; not as root the umask masks them (0775 ->
+        # 0755 for 2040 files of DIR-868L). Only in the staging mode of
+        # FIRMAE_EXTRACT_USER (--done-list): everything is created inside its
+        # 0700 workspace and root re-packs the output. Run directly by a user
+        # into images/, the umask stays.
+        os.umask(0)
+
+    done = ()
+    if arg.done_list:
+        with open(arg.done_list, errors="replace") as f:
+            done = [line.strip() for line in f if line.strip()]
+
     signal.signal(signal.SIGTERM, _terminate)
     extract = Extractor(arg.input,  arg.output,   arg.rootfs,
                         arg.kernel, arg.parallel, arg.sql,
-                        arg.brand,  arg.debug)
+                        arg.brand,  arg.debug, done)
     extract.extract()
     return 0
 

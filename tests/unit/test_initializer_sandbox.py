@@ -91,3 +91,30 @@ def test_platform_without_geteuid_keeps_the_sandbox(initializer, monkeypatch):
     monkeypatch.delenv("FIRMAE_CHROME_NO_SANDBOX", raising=False)
     monkeypatch.delattr(os, "geteuid", raising=False)
     assert "--no-sandbox" not in run_connect(mod, cap)
+
+
+# FIRMAE_BROWSER_USER (analyses/browser_user.sh) sets FIRMAE_BROWSER_PROFILE_DIR
+
+def test_profile_dir_becomes_user_data_dir(initializer, monkeypatch):
+    mod, cap = initializer
+    set_euid(monkeypatch, 1000)
+    monkeypatch.delenv("FIRMAE_CHROME_NO_SANDBOX", raising=False)
+    monkeypatch.setenv("FIRMAE_BROWSER_PROFILE_DIR", "/var/tmp/firmae-browser/run.x/profile")
+    args = run_connect(mod, cap)
+    assert "--user-data-dir=/var/tmp/firmae-browser/run.x/profile" in args
+    assert "--no-sandbox" not in args
+
+
+def test_no_profile_dir_no_user_data_dir(initializer, monkeypatch):
+    mod, cap = initializer
+    monkeypatch.delenv("FIRMAE_BROWSER_PROFILE_DIR", raising=False)
+    assert not [a for a in run_connect(mod, cap) if a.startswith("--user-data-dir")]
+    monkeypatch.setenv("FIRMAE_BROWSER_PROFILE_DIR", "")
+    assert not [a for a in run_connect(mod, cap) if a.startswith("--user-data-dir")]
+
+
+def test_relative_profile_dir_is_refused(initializer, monkeypatch):
+    mod, cap = initializer
+    monkeypatch.setenv("FIRMAE_BROWSER_PROFILE_DIR", "profile")
+    with pytest.raises(SystemExit):
+        run_connect(mod, cap)

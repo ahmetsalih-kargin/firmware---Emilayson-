@@ -43,7 +43,20 @@ sleep 10
 echo '[*] FirmAE web server initializer'
 echo "${BRAND}, ${TARGET}, ${IID}"
 rc=0
-{ time ./initializer.py "$BRAND" "$TARGET" > "$LOG_DIR/initializer_log" 2>&1 ; } 2> "$LOG_DIR/initializer_time" || rc=$?
+if [ -n "${FIRMAE_BROWSER_USER:-}" ]; then
+    # headless Chrome as an unprivileged user, sandbox on (SECURITY.md S11; browser_user.sh)
+    source "$(dirname -- "$0")/browser_user.sh"
+    trap browser_cleanup EXIT
+    if browser_prepare "$FIRMAE_BROWSER_USER"; then
+        browser_userns_warning
+        { time browser_as ./initializer.py "$BRAND" "$TARGET" > "$LOG_DIR/initializer_log" 2>&1 ; } 2> "$LOG_DIR/initializer_time" || rc=$?
+    else
+        rc=$?
+    fi
+    browser_cleanup
+else
+    { time ./initializer.py "$BRAND" "$TARGET" > "$LOG_DIR/initializer_log" 2>&1 ; } 2> "$LOG_DIR/initializer_time" || rc=$?
+fi
 record_step initializer "$rc"
 rc=0
 { time ./nmap.sh "$IID" "$TARGET" > "$LOG_DIR/nmap_log" 2>&1 ; } 2> "$LOG_DIR/nmap_time" || rc=$?

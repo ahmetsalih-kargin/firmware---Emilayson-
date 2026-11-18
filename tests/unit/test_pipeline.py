@@ -484,3 +484,253 @@ def test_many_firmwares_leak_neither_file_descriptors_nor_memory(project):
         one(i)
     assert fds() == fd0
     assert rss() - rss0 < 4096           # KB; the measured growth over 40 runs is 0
+
+
+# ------------------------- FIRMAE_EXTRACT_USER (SECURITY.md S9, firmae/extractuser.py)
+
+FAKE_SETPRIV = "/fake/setpriv"
+
+
+class _NS:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _tiny_tgz(extra=()):
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w|gz") as tar:
+        for name, kind in [(".", tarfile.DIRTYPE), ("./bin", tarfile.DIRTYPE)] + list(extra):
+            t = tarfile.TarInfo(name)
+            t.type, t.mode, t.uid, t.gid = kind, 0o755, 4242, 4242
+            tar.addfile(t)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def as_user(project, monkeypatch, tmp_path):
+    """FIRMAE_EXTRACT_USER set; the "user" is the current one and setpriv is
+    never executed: the spy plays the extractor (writes into the out directory
+    it was given) and records argv / env / cwd."""
+    import pwd
+    from firmae import extractuser, pipeline
+    me = pwd.getpwuid(os.getuid())
+    monkeypatch.setenv("FIRMAE_EXTRACT_USER", me.pw_name)
+    monkeypatch.setenv("FIRMAE_EXTRACT_TMP", str(tmp_path / "xbase"))
+    monkeypatch.setenv("FIRMAE_DB_PASSWORD", "s3cret")
+    monkeypatch.setenv("UNRELATED_SECRET", "no")
+    monkeypatch.setattr(extractuser, "require_root", lambda: None)
+    monkeypatch.setattr(extractuser, "find_setpriv", lambda: FAKE_SETPRIV)
+    calls = []
+    events = []
+    real = pipeline.run_with_timeout
+    behaviour = {"rc": 0, "timeout": False, "tar": None, "extra": {}, "ignore_done": False,
+                 "survivors": [], "pidns": []}
+    # never the real kill: the "extract user" is the current user (kill_user refuses it anyway)
+    monkeypatch.setattr(extractuser, "kill_user",
+                        lambda uid: events.append(("kill", uid)) or list(behaviour["survivors"]))
+    monkeypatch.setattr(extractuser, "pid_namespace_prefix", lambda: list(behaviour["pidns"]))
+
+    def spy(argv, timeout, **kw):
+        if FAKE_SETPRIV not in argv:
+            return real(argv, timeout, **kw)
+        events.append(("run",))
+        prefix = argv[:argv.index(FAKE_SETPRIV)]
+        rest = argv[len(prefix):]
+        inner = rest[rest.index("--") + 1:]
+        with open(inner[inner.index("--done-list") + 1]) as f:
+            done = f.read().split()
+        call = {"argv": rest, "prefix": prefix, "env": kw["env"], "cwd": kw["cwd"], "inner": inner,
+                "done": done, "staged": [os.path.isfile(inner[1]), os.path.isfile(inner[-2])]}
+        calls.append(call)
+        out = inner[-1]
+        if behaviour["rc"] or behaviour["timeout"]:
+            return behaviour["rc"], behaviour["timeout"]
+        skip = set() if behaviour["ignore_done"] else set(done)
+        if "-nk" in inner and IID + ".tar.gz" not in skip:
+            with open(os.path.join(out, IID + ".tar.gz"), "wb") as f:
+                f.write(behaviour["tar"] or _tiny_tgz())
+        if "-nf" in inner and IID + ".kernel" not in skip:
+            with open(os.path.join(out, IID + ".kernel"), "wb") as f:
+                f.write(b"KERNEL")
+        for name, data in behaviour["extra"].items():          # a compromised extractor's extras
+            with open(os.path.join(out, name), "wb") as f:
+                f.write(data)
+        return 0, False
+    monkeypatch.setattr(pipeline, "run_with_timeout", spy)
+    return _NS(calls=calls, events=events, behaviour=behaviour, base=tmp_path / "xbase", user=me)
+
+
+def test_extract_user_unset_runs_the_extractor_as_before(project, monkeypatch):
+    from firmae import pipeline
+    monkeypatch.delenv("FIRMAE_EXTRACT_USER", raising=False)
+    seen = []
+    real = pipeline.run_with_timeout
+
+    def spy(argv, timeout, **kw):
+        seen.append((argv, kw["cwd"], kw["env"]))
+        return real(argv, timeout, **kw)
+    monkeypatch.setattr(pipeline, "run_with_timeout", spy)
+    assert run(project)[0] == ExitCode.OK
+    ext = [(a, c) for a, c, _ in seen if "extractor" in a[0]]
+    firmware = fw(project)
+    assert ext == [(["./sources/extractor/extractor.py", "-b", "dlink", "-sql", "127.0.0.1", "-np", flag,
+                     firmware, "images"], str(project)) for flag in ("-nk", "-nf")]
+    assert all("PROJECT" in e for a, _, e in seen if "extractor" in a[0])     # full environment, as before
+
+
+def test_extract_user_runs_setpriv_with_a_whitelisted_environment(project, as_user):
+    code, out, work = run(project)
+    assert code == ExitCode.OK, out
+    assert len(as_user.calls) == 2
+    u = as_user.user
+    for call, flag in zip(as_user.calls, ("-nk", "-nf")):
+        assert call["argv"][:6] == [FAKE_SETPRIV, "--reuid=%d" % u.pw_uid, "--regid=%d" % u.pw_gid,
+                                    "--init-groups", "--no-new-privs", "--"]
+        inner = call["inner"]
+        assert os.path.basename(inner[0]).startswith("python3")
+        ws = os.path.dirname(os.path.dirname(inner[1]))
+        assert os.path.dirname(ws) == str(as_user.base)
+        assert inner[1] == os.path.join(ws, "bin", "extractor.py")
+        assert inner[2:9] == ["-b", "dlink", "-sql", "127.0.0.1", "-np", flag, "--done-list"]
+        assert inner[-2] == os.path.join(ws, "in", "DIR-868L.zip")
+        assert inner[-1] == os.path.join(ws, "out") and call["cwd"] == os.path.join(ws, "tmp")
+        assert call["staged"] == [True, True]
+        env = call["env"]
+        assert env["FIRMAE_DB_PASSWORD"] == "s3cret" and "UNRELATED_SECRET" not in env
+        assert "PROJECT" not in env and "STUB_IID" not in env
+        assert env["HOME"] == os.path.join(ws, "home") and env["TMPDIR"] == os.path.join(ws, "tmp")
+        assert set(env) <= {"PATH", "LANG", "LC_ALL", "LC_CTYPE", "HOME", "TMPDIR", "USER", "LOGNAME"} | \
+            {k for k in env if k.startswith(("FIRMAE_DB_", "PG"))}
+        assert "PGPASSFILE" not in env
+    # the root side published the normalised output under the usual names
+    import tarfile
+    with tarfile.open(str(project / "images" / ("%s.tar.gz" % IID))) as tar:
+        assert {(m.uid, m.gid, m.uname) for m in tar.getmembers()} == {(0, 0, "root")}
+    assert (project / "images" / ("%s.kernel" % IID)).read_bytes() == b"KERNEL"
+    assert os.listdir(str(as_user.base)) == []                     # workspaces removed
+    assert not (project / "extractor_calls").exists()             # the root extractor never ran
+
+
+def test_extract_user_done_list_reflects_images(project, as_user):
+    (project / "images").mkdir()
+    (project / "images" / ("%s.tar.gz" % IID)).write_bytes(_tiny_tgz())
+    assert run(project)[0] == ExitCode.OK
+    assert IID + ".tar.gz" in as_user.calls[0]["done"]
+
+
+def test_extract_user_without_brand_passes_the_brand_the_extractor_would_derive(project, as_user):
+    (project / "scripts/util.py").write_text(
+        '#!/bin/bash\ncase "$1" in get_brand) echo "";; get_iid) echo -n %s;; esac\n' % IID)
+    d = project / "netgear"
+    d.mkdir()
+    (d / "a.zip").write_text("a")
+    cfg = config.load(str(project))
+    code = Pipeline(cfg, "check", "auto", Reporter(out=io.StringIO(), color=False)).run_firmware(str(d / "a.zip"))
+    assert code == ExitCode.OK
+    assert as_user.calls[0]["inner"][2:4] == ["-b", "netgear"]
+
+
+def test_extract_user_missing_is_an_extraction_error_never_root(project, as_user, monkeypatch):
+    monkeypatch.setenv("FIRMAE_EXTRACT_USER", "no-such-user-firmae-xyz")
+    code, out, _ = run(project)
+    assert code == ExitCode.EXTRACTION
+    assert "no such user" in out and "not extracting as root" in out
+    assert as_user.calls == [] and not (project / "extractor_calls").exists()
+    assert not (project / "images").exists()
+
+
+def test_extract_user_root_uid_is_refused(project, as_user, monkeypatch):
+    monkeypatch.setenv("FIRMAE_EXTRACT_USER", "root")
+    code, out, _ = run(project)
+    assert code == ExitCode.EXTRACTION and "uid 0" in out
+    assert as_user.calls == [] and not (project / "extractor_calls").exists()
+
+
+@pytest.mark.parametrize("rc, timeout, code, text", [(3, False, ExitCode.EXTRACTION, "failed with exit 3"),
+                                                     (0, True, ExitCode.TIMEOUT, "timed out")])
+def test_extract_user_failure_cleans_the_workspace(project, as_user, rc, timeout, code, text):
+    as_user.behaviour.update(rc=rc, timeout=timeout)
+    got, out, _ = run(project)
+    assert got == code and text in out
+    assert os.listdir(str(as_user.base)) == []
+    assert not (project / "images").exists()
+
+
+def test_extract_user_hostile_tarball_is_refused(project, as_user):
+    import tarfile
+    as_user.behaviour["tar"] = _tiny_tgz([("./dev/sda", tarfile.BLKTYPE)])
+    code, out, _ = run(project)
+    assert code == ExitCode.EXTRACTION and "output refused" in out and "device" in out
+    assert not (project / "images" / ("%s.tar.gz" % IID)).exists()
+    assert os.listdir(str(as_user.base)) == []
+
+
+def test_extract_user_output_of_another_firmware_is_ignored(project, as_user):
+    """The extractor of this firmware also writes images of id 1 (another firmware)."""
+    as_user.behaviour["extra"] = {"1.tar.gz": _tiny_tgz(), "1.kernel": b"EVIL"}
+    assert run(project)[0] == ExitCode.OK
+    assert sorted(os.listdir(str(project / "images"))) == [IID + ".kernel", IID + ".tar.gz"]
+    assert (project / "images" / (IID + ".kernel")).read_bytes() == b"KERNEL"
+
+
+def test_extract_user_nk_does_not_publish_a_kernel(project, as_user):
+    as_user.behaviour["extra"] = {IID + ".kernel": b"from -nk"}
+    cfg = config.load(str(project))
+    p = Pipeline(cfg, "check", "dlink", Reporter(out=io.StringIO(), color=False))
+    p._extract("-nk", fw(project), ["-b", "dlink"])
+    assert sorted(os.listdir(str(project / "images"))) == [IID + ".tar.gz"]
+
+
+def test_extract_user_existing_output_is_never_replaced(project, as_user):
+    (project / "images").mkdir()
+    (project / "images" / (IID + ".tar.gz")).write_bytes(b"published before")
+    as_user.behaviour["ignore_done"] = True                # a hostile extractor writes it anyway
+    code, out, _ = run(project)
+    assert code == ExitCode.EXTRACTION and "exists already" in out
+    assert (project / "images" / (IID + ".tar.gz")).read_bytes() == b"published before"
+
+
+def test_extract_user_fallback_tag_without_database(project, as_user):
+    """No image id from the database: extractor.py's "<basename>_<md5>" name is still accepted."""
+    from firmae.pipeline import firmware_digest
+    (project / "scripts/util.py").write_text('#!/bin/bash\ncase "$1" in get_iid) exit 1;; esac\n')
+    firmware = fw(project)
+    tag = os.path.basename(firmware) + "_" + firmware_digest(firmware)
+    as_user.behaviour["extra"] = {tag + ".tar.gz": _tiny_tgz()}
+    code, out, _ = run(project)
+    assert code == ExitCode.DATABASE                      # the pipeline's own get_iid fails next
+    assert (project / "images" / (tag + ".tar.gz")).exists()
+
+
+def test_extract_user_kills_before_and_after_each_run(project, as_user):
+    assert run(project)[0] == ExitCode.OK
+    uid = as_user.user.pw_uid
+    per_call = [("kill", uid), ("run",), ("kill", uid), ("kill", uid)]   # before, before collect, finally
+    assert as_user.events == per_call * 2
+
+
+def test_extract_user_survivors_are_an_error(project, as_user):
+    as_user.behaviour["survivors"] = [4242]
+    code, out, _ = run(project)
+    assert code == ExitCode.EXTRACTION and "survive SIGKILL before" in out
+    assert as_user.calls == []                             # never started next to a survivor
+    assert os.listdir(str(as_user.base)) == []
+
+
+def test_extract_user_runs_in_a_pid_namespace_when_available(project, as_user):
+    as_user.behaviour["pidns"] = ["/usr/bin/unshare", "--pid", "--fork", "--kill-child", "--"]
+    assert run(project)[0] == ExitCode.OK
+    assert all(c["prefix"] == as_user.behaviour["pidns"] for c in as_user.calls)
+
+
+def test_extract_user_waits_for_another_extraction(project, as_user, monkeypatch):
+    from firmae import extractuser
+    monkeypatch.setattr(extractuser, "LOCK_WAIT", 0)
+    held = extractuser.lock_runs(str(as_user.base), wait=0)
+    try:
+        code, out, _ = run(project)
+    finally:
+        os.close(held)
+    assert code == ExitCode.BUSY and "holds" in out
+    assert as_user.calls == [] and as_user.events == []

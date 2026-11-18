@@ -16,12 +16,14 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import time
 
 from scripts.procgroup import run_with_timeout
 
+from . import extractuser
 from .config import VALID_ARCHS
 from .errors import ExitCode, FirmAEError
 from .state import State
@@ -212,6 +214,9 @@ class Pipeline:
         return res.returncode, res.stdout.decode(errors="replace").strip()
 
     def _extract(self, flag, infile, brand_args):
+        user = extractuser.requested_user()
+        if user:
+            return self._extract_as(user, flag, infile, brand_args)
         argv = (["./sources/extractor/extractor.py"] + brand_args +
                 ["-sql", self.cfg.PSQL_IP, "-np", flag, infile, "images"])
         rc, timed_out = run_with_timeout(
@@ -223,6 +228,99 @@ class Pipeline:
         if rc != 0:
             raise FirmAEError("extract", ExitCode.EXTRACTION,
                               "extractor.py (%s) failed with exit %d" % (flag, rc))
+
+    def _extract_as(self, user, flag, infile, brand_args):
+        """extractor.py as the unprivileged FIRMAE_EXTRACT_USER (SECURITY.md S9;
+        see firmae/extractuser.py). Same images/<IID>.tar.gz / .kernel and
+        database rows as the root extraction; never falls back to root."""
+        cfg = self.cfg
+        src = os.path.join(cfg.root, infile)
+        base = extractuser.base_dir()
+        try:
+            ident = extractuser.lookup(user)
+            extractuser.require_root()
+            setpriv = extractuser.find_setpriv()
+        except (extractuser.ExtractUserError, OSError) as e:
+            raise FirmAEError("extract", ExitCode.EXTRACTION, "extractor.py (%s): %s" % (flag, e))
+        # All runs share the user's uid: one extraction at a time, and nothing of
+        # an earlier one may still run (a process that left its process group).
+        try:
+            lock = extractuser.lock_runs(base)
+        except (extractuser.ExtractUserError, OSError) as e:
+            raise FirmAEError("extract", ExitCode.BUSY, "extractor.py (%s): %s" % (flag, e))
+        try:
+            self._stop_user_processes(ident, flag, "before")
+            try:
+                ws = extractuser.Workspace.create(base, ident)
+            except (extractuser.ExtractUserError, OSError) as e:
+                raise FirmAEError("extract", ExitCode.EXTRACTION, "extractor.py (%s): %s" % (flag, e))
+            try:
+                self._extract_in(ws, ident, setpriv, flag, infile, src, brand_args)
+            finally:
+                try:
+                    self._stop_user_processes(ident, flag, "after")
+                finally:
+                    for err in ws.cleanup()[:5]:
+                        self.say.error("cannot remove extraction workspace: %s" % err, "extract")
+        finally:
+            os.close(lock)
+
+    def _stop_user_processes(self, ident, flag, when):
+        try:
+            left = extractuser.kill_user(ident.uid)
+        except (extractuser.ExtractUserError, OSError) as e:
+            raise FirmAEError("extract", ExitCode.EXTRACTION, "extractor.py (%s): %s" % (flag, e))
+        if left:
+            raise FirmAEError("extract", ExitCode.EXTRACTION,
+                              "extractor.py (%s): %d process(es) of %s survive SIGKILL %s the extraction"
+                              % (flag, len(left), ident.name, when))
+
+    def _expected_tags(self, src, infile):
+        """Tags root accepts: the image id the database gives for the firmware's
+        md5 (as get_iid does right after), and extractor.py's fallback name."""
+        tags = [os.path.basename(src) + "_" + firmware_digest(src)]
+        rc, iid = self._capture(["./scripts/util.py", "get_iid", infile, self.cfg.PSQL_IP])
+        if rc == 0 and iid.isascii() and iid.isdigit():
+            tags.append(iid)
+        return tags
+
+    def _extract_in(self, ws, ident, setpriv, flag, infile, src, brand_args):
+        cfg = self.cfg
+        images = os.path.join(cfg.root, "images")
+        try:
+            fw = ws.stage_firmware(src)
+            script = ws.stage_script(os.path.join(cfg.root, "sources", "extractor", "extractor.py"))
+            done = ws.write_done_list(images)
+        except (extractuser.ExtractUserError, OSError) as e:
+            raise FirmAEError("extract", ExitCode.EXTRACTION,
+                              "extractor.py (%s): cannot prepare %s: %s" % (flag, ws.path, e))
+        # extractor.py derives the brand from its input path when it gets no
+        # -b; that path is now the copy, so pass what it would have derived
+        if not brand_args:
+            brand_args = ["-b", extractuser.path_brand(src, cfg.root)]
+        env = extractuser.child_env(cfg.env(), ws, ident)
+        python = shutil.which("python3", path=cfg.env().get("PATH")) or "python3"
+        argv = extractuser.command(setpriv, ident, [python, script] + brand_args +
+                                   ["-sql", cfg.PSQL_IP, "-np", flag, "--done-list", done, fw, ws.out],
+                                   pidns=extractuser.pid_namespace_prefix())
+        self.say.debug("extract (%s) as %s: %s" % (flag, ident.name, " ".join(argv)))
+        rc, timed_out = run_with_timeout(
+            argv, EXTRACT_TIMEOUT, grace=EXTRACT_GRACE, cwd=ws.tmp, env=env,
+            stdout=subprocess.DEVNULL)
+        if timed_out:
+            raise FirmAEError("extract", ExitCode.TIMEOUT,
+                              "extractor.py (%s) timed out after %ds" % (flag, EXTRACT_TIMEOUT))
+        if rc != 0:
+            raise FirmAEError("extract", ExitCode.EXTRACTION,
+                              "extractor.py (%s) failed with exit %d" % (flag, rc))
+        # nothing of the user may still write into W/out while root reads it
+        self._stop_user_processes(ident, flag, "after")
+        allowed = extractuser.expected_names(self._expected_tags(src, infile), flag)
+        try:
+            extractuser.collect(ws.out, images, ident.uid, allowed)
+        except (extractuser.ExtractUserError, OSError) as e:
+            raise FirmAEError("extract", ExitCode.EXTRACTION,
+                              "extractor.py (%s) output refused: %s" % (flag, e))
 
     def _show_tail(self, logpath):
         try:
