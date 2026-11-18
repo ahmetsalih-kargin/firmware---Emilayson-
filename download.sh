@@ -3,9 +3,8 @@
 set -e
 
 # Every download is checked against binaries.sha256 (sha256sum format).
-#   FIRMAE_VERIFY_DOWNLOADS=warn   (default) a file whose hash is UNKNOWN / not listed is
-#                                  kept, with a WARNING
-#   FIRMAE_VERIFY_DOWNLOADS=strict a file whose hash is UNKNOWN / not listed is rejected
+#   FIRMAE_VERIFY_DOWNLOADS=strict (default) a file whose hash is UNKNOWN / not listed is rejected
+#   FIRMAE_VERIFY_DOWNLOADS=warn   a file whose hash is UNKNOWN / not listed is kept, with a WARNING
 # A known hash that does not match is always an error (the download is deleted).
 # binaries.sha256 is validated first, in both modes: every line must be UNKNOWN or 64 hex
 # digits plus a bare file name (optional leading '*'), no duplicates; CRLF is tolerated.
@@ -16,7 +15,7 @@ set -e
 cd -- "$(CDPATH= cd -- "$(dirname -- "$0")" >/dev/null && pwd)"
 
 SUMS=binaries.sha256
-MODE="${FIRMAE_VERIFY_DOWNLOADS:-warn}"
+MODE="${FIRMAE_VERIFY_DOWNLOADS:-strict}"
 case "${MODE}" in
   warn|strict) ;;
   *) echo "ERROR: FIRMAE_VERIFY_DOWNLOADS must be 'warn' or 'strict', not '${MODE}'" >&2; exit 1 ;;
