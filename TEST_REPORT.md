@@ -852,7 +852,7 @@ Kod: `firmae/hwserial.py` + `firmae/hwprofile.py` (6.2, komut satırı izi), `fi
 
 ### A) Ölçülenler
 
-**İndirmeler.** `binaries.sha256`: 27 SHA-256 (iki bağımsız indirme eşleşti; pr0v3rbs release dosyalarını sabitler, kaynağın özgünlüğünü kanıtlamaz). `download.sh` varsayılanı `strict`; mevcut `binaries/` üzerinde strict koşu çıkış 0; uyuşmazlık = dosya silinir, çıkış 1.
+**İndirmeler.** `binaries.sha256`: 27 SHA-256 (hash'ler 2026-11-17'de kaydedildi; iki bağımsız indirme eşleşti; pr0v3rbs release dosyalarını sabitler, kaynağın özgünlüğünü kanıtlamaz). `download.sh` varsayılanı `strict`; mevcut `binaries/` üzerinde strict koşu çıkış 0; uyuşmazlık = dosya silinir, çıkış 1.
 
 **Bağımlılıklar (pip-audit 2026-11-17).**
 
@@ -868,16 +868,18 @@ Kod: `firmae/hwserial.py` + `firmae/hwprofile.py` (6.2, komut satırı izi), `fi
 
 **S7 — bayrak başına kanıt (daraltılmış mod).** Varsayılan: `--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/loop-control --device /dev/net/tun --device-cgroup-rule 'b 7:* rmw'` (`--privileged` ve `-v /dev:/dev` yok).
 
-| Bayrak | Amaç (`docker-helper.py` `NARROW_FLAGS` yorumlarından) |
-|---|---|
-| `--cap-add SYS_ADMIN` | imajın `mount`/`umount`'u (`losetup` bunsuz da çalışır) |
-| `--cap-add NET_ADMIN` | `tunctl`, `ip link` (VLAN), `iptables` |
-| `--device /dev/loop-control` | `losetup --find` |
-| `--device /dev/net/tun` | `tunctl`, QEMU'nun TAP'i |
-| `--device-cgroup-rule 'b 7:* rmw'` | `/dev/loopN` (başka tüm loop aygıtları da açılır) |
-| ~~`b 259:*`~~ | **kaldırıldı:** denetim, NVMe disklerini (259:0) konteynere açtığını kanıtladı. Daraltılmış modda loop artık `--partscan` yerine katı doğrulanmış `sfdisk` dökümünden `--offset/--sizelimit` ile bağlanır |
+Her bayrak, çalışan gerçek bir konteynerde (fcore:24.04, Docker Desktop/WSL2, 2026-11-18) sırayla çıkarılarak ölçüldü. Her turda şunlar denendi: 64 MB imaj, fdisk, add_partition, mkfs.ext2, mount, imaj içinde mknod+chroot, umount, e2fsck, tunctl, VLAN, ip addr, iptables/ip6tables ekle/sil, QEMU'nun TAP açması.
 
-Not: "bayrak olmazsa tam olarak ne başarısız olur" ölçümü bu belgeye aktarılmadı (rapor yazarında yoktu); yukarıdaki amaçlar koddaki yorumlardır. Ölçüm kanıtı gerekiyorsa ayrıca eklenmelidir.
+| Bayrak | Amaç (`docker-helper.py` `NARROW_FLAGS` yorumlarından) | Bayrak olmadan ölçülen hata |
+|---|---|---|
+| `--cap-add SYS_ADMIN` | imajın `mount`/`umount`'u (`losetup` bunsuz da çalışır) | `mount: permission denied`, `umount: must be superuser` (losetup ve e2fsck yine çalışır) |
+| `--cap-add NET_ADMIN` | `tunctl`, `ip link` (VLAN), `iptables` | tunctl: `TUNSETIFF: Operation not permitted`; iptables/ip6tables: "Permission denied"; QEMU: "could not configure /dev/net/tun" |
+| `--device /dev/loop-control` | `losetup --find` | `losetup: cannot find an unused loop device` |
+| `--device /dev/net/tun` | `tunctl`, QEMU'nun TAP'i | `Failed to open '/dev/net/tun'` (tunctl ve QEMU) |
+| `--device-cgroup-rule 'b 7:* rmw'` | `/dev/loopN` (başka tüm loop aygıtları da açılır) | `/dev/loopN` açılamaz, `add_partition` boş döner |
+| ~~`b 259:*`~~ | **kaldırıldı:** denetim, NVMe disklerini (259:0) konteynere açtığını kanıtladı. Yalnızca `--partscan` bölüm düğümleri için gerekliydi | `/dev/loopNp1 did not appear within 30s`. Denetim sonrası kaldırıldı; daraltılmış modda loop artık `--offset/--sizelimit` ile bağlanır (katı doğrulanmış `sfdisk` dökümünden). Nihai bayrak setiyle konteyner içinde `mknod b 259 0` + dd ve `mknod b 8 0` + dd: "Operation not permitted" |
+
+Varsayılan Docker yetenekleri üzerine notlar: `MKNOD` Docker'ın varsayılan yetenekleri arasındadır ve gereklidir (`--cap-drop MKNOD` → `mknod: /dev/loop2: Operation not permitted`); `NET_RAW` ping için varsayılan bırakıldı; `SYS_CHROOT` varsayılanı makeImage'in chroot'unda kullanılır. Docker Desktop'ta AppArmor seçeneği gerekmedi (daemon SecurityOptions: seccomp builtin, cgroupns).
 
 `FIRMAE_DOCKER_PRIVILEGED=1` eski bayrakları geri getirir; AppArmor etkin daemon'larda daraltılmış mod `FIRMAE_DOCKER_APPARMOR=unconfined` olmadan reddedilir.
 
