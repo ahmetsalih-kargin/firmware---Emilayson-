@@ -6,6 +6,54 @@ All changes are relative to upstream `master` `653565b`. Step numbers refer to
 
 ## [Unreleased] — refactor/hardening
 
+### Group 4 — downloads, dependencies, Docker 24.04, narrowed Docker, privilege separation (2026-11-18)
+
+Measured 2026-11-18 on WSL2 Ubuntu (DIR-868L armel = "A", WNAP320 mipseb = "B"); tables in `TEST_REPORT.md` "Grup 4".
+Findings: `SECURITY.md` S7, S9, S11, S15, S16. Unit tests 1948. **Behaviour changes are marked.**
+
+- **Downloads.** `binaries.sha256` now holds 27 SHA-256 hashes (two independent downloads matched; this pins the current
+  pr0v3rbs release assets and does not prove their origin). **Behaviour change:** `download.sh` defaults to `strict`
+  (`FIRMAE_VERIFY_DOWNLOADS=warn` opts out). Verified: a strict run exits 0; a mismatch deletes the file and exits 1.
+- **Dependencies (pip-audit 2026-11-17).** `requests` 2.32.3 -> 2.33.0, `urllib3` 2.2.3 -> 2.8.0 (0 remaining advisories for
+  both), `psycopg2` 2.9.1 -> 2.9.9 (2.9.1 builds but cannot be imported on Python 3.12). **Behaviour change:**
+  `requirements.txt` needs **Python >= 3.10** (user decision); every statement about Python 3.8 support was corrected.
+  73 advisories remain in packages FirmAE does not import (scrapy, cryptography, werkzeug, paramiko, flask, future,
+  pycryptodome; presumably routersploit); untouched.
+- **`FIRMAE_DB_PORT`** (default: libpq default / `PGPORT`) for `scripts/util.py`, `tar2db.py`, `getArch.py`, `extractor.py`
+  and `firmae.config` (`tests/unit/test_db_port.py`).
+- **Docker image.** `core/Dockerfile` is built on `ubuntu:24.04` (`fcore:24.04`, 5.12 GB): `PIP_BREAK_SYSTEM_PACKAGES=1` in
+  the disposable image, pinned installs with `--ignore-installed`, binwalk from apt (2.3.4+dfsg1), `sasquatch` built from a
+  pinned commit (`-Werror` removed, `-fcommon`, squashfs4.3 tarball SHA-256 checked), pinned python-lzo 1.15, cstruct 6.2,
+  ubi_reader 0.8.16, jefferson 0.4.8, `fdisk`, build-time import/smoke checks. Docker Desktop WSL integration for Ubuntu was
+  enabled (user-requested; a backup of the settings file was kept).
+- **`docker-helper.py`.** A failed pipeline is detected with `docker exec pgrep` instead of waiting 2400 s; `stop_core` releases
+  recorded loop devices before `docker stop`.
+- **S7 narrowed (behaviour change).** Default flags: `--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/loop-control
+  --device /dev/net/tun --device-cgroup-rule 'b 7:* rmw'`; no `--privileged`, no `-v /dev:/dev`. `b 259:*` was removed after the
+  audit showed it exposed NVMe disks (259:0); narrowed mode attaches loop devices with `--offset/--sizelimit` from a strictly
+  validated `sfdisk` dump instead of `--partscan`. `FIRMAE_DOCKER_PRIVILEGED=1` restores the old flags; AppArmor-enabled daemons
+  refuse the narrowed mode unless `FIRMAE_DOCKER_APPARMOR=unconfined`. Residual risks: `SYS_ADMIN` is close to root, `b 7:*` exposes
+  all host loop devices, `kill -9` can leave a loop device, the container reaches host services on 172.17.0.1, privileged mode
+  has no loop release.
+- **S9/S11 opt-in (default off).** `FIRMAE_EXTRACT_USER` (`firmae/extractuser.py`: `setpriv --no-new-privs`, `unshare --pid --fork
+  --kill-child`, global `flock`, uid-kill before/after, root-side workspace, root-decided output names, no-overwrite publish via
+  `os.link`, tar normalised to root ownership), `FIRMAE_EXTRACT_TMP`, `FIRMAE_BROWSER_USER` / `FIRMAE_BROWSER_TMP`
+  (`analyses/browser_user.sh`: `setsid --wait`, stdin `/dev/null`, own lock and uid-kill), `FIRMAE_CREATE_USERS=1` in `install.sh`.
+  Default off because unprivileged extraction loses device nodes (A -74, B -47), setgid bits (A 3 dirs) and symlink mtimes
+  (B 197); B's `hw_profile` uart changed covered -> not-referenced as a consequence. Residual: a compromised extractor holding
+  DB credentials could map md5 -> id so that root publishes under a not-yet-published id; the DB password is visible to the
+  extract user's tools.
+- **Tests:** new `test_db_port.py`, `test_extractuser.py`, `test_browser_user.py`; additions in `test_docker_helper.py`,
+  `test_install_scripts.py`, `test_lifecycle_functions.py`, `test_pipeline.py`, `test_extractor.py`, `test_initializer_sandbox.py`.
+- **Independent audit:** 1 high (the 259 rule), 2 medium (cross-IID overwrite, shared UID), lows (ctty/TIOCSTI, AppArmor, umask,
+  stale p1 node), all fixed and re-measured; 15/15 mutations killed in the audit, plus later fix tests.
+- **Not verified:** native Ubuntu host with AppArmor, `-ea`/`-ed`/`-er` modes, parallel containers, Chrome itself (not installed),
+  non-root firmware owners / setuid files (none in the samples), non-squashfs extractors, Docker mode with an extract user (the
+  image has no such user), Python 3.10/3.11 runtimes (only 3.12.3), `install.sh` real run.
+- **Incidents (not product bugs):** a stray `yes` output (46 GB) from an earlier agent script filled drive C: (deleted); Windows
+  memory exhaustion crashed WSL during a Docker build (Wsl/0x8007000e; resolved after a reboot); a mutation test once ran a real
+  `pkill -U ahmet` in WSL (the test now uses stubs).
+
 ### Phase 6.2 / 6.3 — command-line trace and aggregate report (2026-11-17, "group 3")
 
 Scope of 6.2 was agreed as "command-line trace": no guest-side `strace`, no pipeline change. Measured on two real
@@ -30,8 +78,8 @@ analyze-mode logs (see `TEST_REPORT.md` "Faz 6.2 / 6.3 / 7"); `firmae.hwreport` 
 
 ### Phase 7 — dependencies and installation, decision-free part (2026-11-17)
 
-Code and unit tests only: `install.sh` and `core/Dockerfile` were **not run / built**. Hashes in `binaries.sha256` are
-all `UNKNOWN` (filling them needs downloads: user decision). Tests: `tests/unit/test_install_scripts.py`,
+Code and unit tests only: `install.sh` and `core/Dockerfile` were **not run / built**. Hashes in `binaries.sha256` were
+all `UNKNOWN` at that time (filled in group 4, see above). Tests: `tests/unit/test_install_scripts.py`,
 `test_initializer_sandbox.py`, additions in `test_cleanup_scripts.py` and `test_audit_fixes.py`.
 
 - **`scripts/delete.sh`** passes `PGPASSWORD="${FIRMAE_DB_PASSWORD:-firmadyne}"` to psql only (pg_hba is md5, so the
@@ -62,7 +110,7 @@ all `UNKNOWN` (filling them needs downloads: user decision). Tests: `tests/unit/
 ### Phase 4.3 / 4.4 / 4.5 — `firmae/image.py`, `emulation.conf`, `firmae/check.py` (2026-11-17, "group 2")
 
 Measured on real emulation (WSL2, DIR-868L armel and WNAP320 mipseb, TAP mode; see `TEST_REPORT.md` "Grup 2"). The DHCP
-mode with a real firmware, analyze/debug/run/boot, Docker mode and a Python 3.8 runtime are **not** verified.
+mode with a real firmware, analyze/debug/run/boot, Docker mode and Python 3.10/3.11 runtimes are **not** verified (Python 3.8 is no longer supported, see group 4).
 Scope is deliberately minimal (user decision): no full Python launcher, no native loop/mount/`tarfile`.
 
 - **4.5 `check_emulation` in Python.** `scripts/check_emulation.sh` is a thin wrapper; `firmae/check.py` (with
@@ -148,7 +196,7 @@ input, real CLI on a synthetic tarball) and exercised in real emulation runs of 
 firmwares (DIR-868L ARM, WNAP320 MIPS).
 
 - **Real-run validation:** TEST_REPORT.md ("Faz 6.1 — donanım profili"). Not covered there:
-  Python 3.8, a second independent audit, analyze/debug/run/boot modes, Docker mode.
+  Python 3.10/3.11 runtimes (3.8 unsupported since group 4), a second independent audit, analyze/debug/run/boot modes, Docker mode.
 
 - **New step `hwprofile`** (`firmae/pipeline.py`, `_hwprofile_static`): after architecture
   detection and before `tar2db`/`makeImage`, runs

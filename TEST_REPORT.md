@@ -540,7 +540,7 @@ fark (önceki commit'e göre) şablondaki 16 satırlık denetim bloğu
 
 ### A) Birim testleri
 
-WSL2 Ubuntu, Python 3.12.3: **428 → 769 test, hepsi geçiyor** (F altındaki düzeltmeden sonra 772; 769 ilk ölçümdür). Python 3.8 ile **koşulmadı**.
+WSL2 Ubuntu, Python 3.12.3: **428 → 769 test, hepsi geçiyor** (F altındaki düzeltmeden sonra 772; 769 ilk ölçümdür). Python 3.8 ile **koşulmadı** (grup 4'ten beri desteklenmiyor: Python ≥ 3.10).
 Yeni dosyalar: `test_hwprofile.py` (204 test), `test_hwserial.py` (62),
 `test_pipeline_hwprofile.py` ve `test_hwprofile_integration.py` (gerçek
 `python3 -m firmae.hwprofile` ile bütünleşme).
@@ -630,7 +630,7 @@ B: [hw] watchdog=failing mtd=failing gpio=not-referenced nvram=not-referenced i2
 
 ### E) Doğrulanmayanlar
 
-- Python 3.8.
+- Python 3.8 (artık desteklenmiyor; ≥ 3.10).
 - Düzeltmeler için ikinci bağımsız denetim.
 - analyze/debug/run/boot modlarında profil adımı.
 - Docker modu.
@@ -815,7 +815,7 @@ Kod: `firmae/image.py` (makeImage), `scratch/<IID>/emulation.conf` + statik `scr
 
 - DHCP modu gerçek firmware ile.
 - `analyze` / `debug` / `run` / `boot` modları ve Docker modu.
-- Python 3.8 çalışma zamanı (yalnızca sözdizimi).
+- Python 3.8 çalışma zamanı (yalnızca sözdizimi; artık desteklenmiyor, ≥ 3.10).
 - Boru hattı zaman aşımı temizliğinin uçtan uca davranışı.
 - Son QEMU argv'si eski altınla yalnızca gözle karşılaştırıldı (otomatik bayt karşılaştırması yok).
 
@@ -843,5 +843,76 @@ Kod: `firmae/hwserial.py` + `firmae/hwprofile.py` (6.2, komut satırı izi), `fi
 - `install.sh` gerçek koşusu ve `docker build`.
 - Gerçek indirmeler (hash'ler `UNKNOWN`).
 - `firmae.hwreport`'un gerçek bir scratch setinde çalıştırılması.
-- Python 3.8 çalışma zamanı.
+- Python 3.8 çalışma zamanı (artık desteklenmiyor, ≥ 3.10).
 - Grup 3 için gerçek emülasyon yeniden koşusu yok: değişiklikler yalnızca son işleme ve kurulum betiklerini etkiler; uyumluluk gerçek loglarda bayt bayt aynı çıktıyla gösterildi.
+
+## Grup 4 — indirmeler, bağımlılıklar, Docker 24.04, S7 daraltma, ayrıcalık ayrımı (2026-11-18)
+
+Ölçüm: 2026-11-18 (aksi belirtilmedikçe), WSL2 Ubuntu; A = DIR-868L (armel), B = WNAP320 (mipseb). **Ölçülenler** ile **ölçülmeyenler** ayrıdır.
+
+### A) Ölçülenler
+
+**İndirmeler.** `binaries.sha256`: 27 SHA-256 (iki bağımsız indirme eşleşti; pr0v3rbs release dosyalarını sabitler, kaynağın özgünlüğünü kanıtlamaz). `download.sh` varsayılanı `strict`; mevcut `binaries/` üzerinde strict koşu çıkış 0; uyuşmazlık = dosya silinir, çıkış 1.
+
+**Bağımlılıklar (pip-audit 2026-11-17).**
+
+| Paket | Önce | Sonra | Kalan kayıt |
+|---|---|---|---|
+| requests | 2.32.3 | 2.33.0 | 0 |
+| urllib3 | 2.2.3 | 2.8.0 | 0 |
+| psycopg2 | 2.9.1 | 2.9.9 | (2.9.1 derlenir ama Python 3.12'de import edilemez) |
+
+`requirements.txt` artık Python >= 3.10 ister (kullanıcı kararı). Kalan **73** kayıt FirmAE'nin import etmediği paketlerde (scrapy, cryptography, werkzeug, paramiko, flask, future, pycryptodome; muhtemelen routersploit); dokunulmadı.
+
+**Docker imajı.** `core/Dockerfile` → `ubuntu:24.04`, imaj `fcore:24.04`, **5,12 GB** (ayrıntı: ARCHITECTURE.md §12.1). Docker Desktop WSL entegrasyonu Ubuntu için açıldı (kullanıcı isteği; ayar dosyası yedeği tutuldu). `FIRMAE_DB_PORT` eklendi. `docker-helper`: başarısız boru hattı `docker exec pgrep` ile algılanır (2400 sn beklenmez); `stop_core` loop aygıtlarını `docker stop` öncesi bırakır.
+
+**S7 — bayrak başına kanıt (daraltılmış mod).** Varsayılan: `--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/loop-control --device /dev/net/tun --device-cgroup-rule 'b 7:* rmw'` (`--privileged` ve `-v /dev:/dev` yok).
+
+| Bayrak | Amaç (`docker-helper.py` `NARROW_FLAGS` yorumlarından) |
+|---|---|
+| `--cap-add SYS_ADMIN` | imajın `mount`/`umount`'u (`losetup` bunsuz da çalışır) |
+| `--cap-add NET_ADMIN` | `tunctl`, `ip link` (VLAN), `iptables` |
+| `--device /dev/loop-control` | `losetup --find` |
+| `--device /dev/net/tun` | `tunctl`, QEMU'nun TAP'i |
+| `--device-cgroup-rule 'b 7:* rmw'` | `/dev/loopN` (başka tüm loop aygıtları da açılır) |
+| ~~`b 259:*`~~ | **kaldırıldı:** denetim, NVMe disklerini (259:0) konteynere açtığını kanıtladı. Daraltılmış modda loop artık `--partscan` yerine katı doğrulanmış `sfdisk` dökümünden `--offset/--sizelimit` ile bağlanır |
+
+Not: "bayrak olmazsa tam olarak ne başarısız olur" ölçümü bu belgeye aktarılmadı (rapor yazarında yoktu); yukarıdaki amaçlar koddaki yorumlardır. Ölçüm kanıtı gerekiyorsa ayrıca eklenmelidir.
+
+`FIRMAE_DOCKER_PRIVILEGED=1` eski bayrakları geri getirir; AppArmor etkin daemon'larda daraltılmış mod `FIRMAE_DOCKER_APPARMOR=unconfined` olmadan reddedilir.
+
+**Docker modu gerçek koşu (`-ec`).**
+
+| Firmware | Ayrıcalıklı | Daraltılmış | Sonuç |
+|---|---|---|---|
+| A (armel) | 456 sn | 445 sn | web true, 192.168.0.1 |
+| B (mipseb) | 429 sn | 419 sn | web true, 192.168.0.100 |
+
+Son emülasyon sırasında ve `makeImage` sırasında Ctrl-C: arkada hiçbir şey (süreç, loop, bağlama) kalmadı.
+
+**S9/S11 opt-in (host modu, çıkarım kullanıcısı açık).** A: çıkış 0, 438 sn; B: çıkış 0, 412 sn; sonuçlar root ile aynı. Çıkarım sırasında Ctrl-C: çıkış 130, kalıntı yok. Varsayılan kapalı olmasının nedeni (ayrıcalıksız çıkarımda kayıplar):
+
+| | A | B |
+|---|---|---|
+| Aygıt düğümleri | −74 | −47 |
+| setgid bitleri | 3 dizin | — |
+| symlink mtime | — | 197 |
+
+B'nin `hw_profile` uart durumu bunun sonucu olarak `covered` → `not-referenced` oldu.
+
+**Son host modu regresyonu (2026-11-18).** Tam birim takımı **1948 geçti** (309 sn). A çıkış 0, 436 sn; B çıkış 0, 408 sn; C 130; H 130; tüm sızıntı sayaçları 0; sonuçlar/`run.sh`/`emulation.conf` grup 2 ile aynı. `download.sh` strict koşusu mevcut binary'lerle çıkış 0. **İzleme eksiği:** bu turda C/H için +5/+30 sn `pgrep` ve bellek serileri toplanmadı (ölçüm betiği yoklama hatası); sayaçlar ölçüldü.
+
+**Bağımsız denetim.** 1 yüksek (`b 259:*`), 2 orta (IID'ler arası üzerine yazma, paylaşılan UID), düşükler (ctty/TIOCSTI, AppArmor, umask, bayat p1 düğümü): hepsi düzeltildi ve yeniden ölçüldü. Denetimde 15/15 mutasyon öldürüldü; düzeltmeler için ek testler yazıldı.
+
+**Olay notları.** (1) Önceki bir ajan betiğinin başıboş `yes` çıktısı (46 GB) C: sürücüsünü doldurdu (silindi). (2) Docker derlemesi sırasında Windows bellek tükenmesi WSL'yi çökertti (Wsl/0x8007000e; yeniden başlatma sonrası düzeldi). (3) Bir mutasyon testi WSL'de gerçek `pkill -U ahmet` çalıştırdı (test artık saplama kullanıyor).
+
+### B) Ölçülmeyenler
+
+- AppArmor'lu yerel Ubuntu host (WSL'de AppArmor yok).
+- Docker `-ea`/`-ed`/`-er` modları ve paralel konteynerler.
+- Chrome'un kendisi (kurulu değildi); yalnızca `browser_user.sh` ve sarmalayıcı birim testli.
+- Root olmayan sahipli / setuid firmware dosyaları (örneklerde yok); squashfs dışı çıkarıcılar.
+- Docker modunda çıkarım kullanıcısı (imajda böyle bir kullanıcı yok).
+- Python 3.10/3.11 çalışma zamanı (yalnızca 3.12.3); Python 3.8 artık desteklenmiyor.
+- `install.sh` gerçek koşusu; `install.sh`'in üç indirmesinin doğrulanması yok.
+- Kalan 73 zafiyet kaydının giderilmesi.

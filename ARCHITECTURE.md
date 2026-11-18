@@ -20,6 +20,7 @@
 >   (emülasyon denetimi), `scratch/<IID>/emulation.conf` + statik `scripts/emulate.sh`
 >   (üretilen `run.sh` sabit sarmalayıcıdır; Bash kodu üretilmez). Tam Python başlatıcı
 >   ve yerel loop/mount/`tarfile` yapılmadı.
+> - **Grup 4 (2026-11-18):** Docker modu `ubuntu:24.04` üzerinde ve `--privileged`'sız; opt-in çıkarım ve Chrome kullanıcıları (`firmae/extractuser.py`, `analyses/browser_user.sh`); bkz. §12.
 > - Güvenlik ve test durumu: `SECURITY.md`, `TEST_REPORT.md`, `CHANGELOG.md`.
 >
 > Kararlar: tek kullanıcılı lab makinesi tehdit modeli, WSL2 (Ubuntu 24.04) test ortamı,
@@ -326,7 +327,7 @@ olmadığı — WSL2'de dinamik test ile doğrulanacak.
 > `firmae/hwserial.py` (profil üreticisi ve seri log ayrıştırıcısı) ile `firmae/pipeline.py`
 > (boru hattı bağlantısı) üzerinden eklendi ve **iki firmware (DIR-868L ARM, WNAP320 MIPS) ile
 > gerçek emülasyon koşusunda doğrulandı** (ölçümler: TEST_REPORT.md "Faz 6.1"). Doğrulanmayanlar:
-> Python 3.8, ikinci bağımsız denetim, analyze/debug/run/boot ve Docker modları, daha geniş
+> Python 3.10/3.11 çalışma zamanı (3.8 artık desteklenmiyor, bkz. §12), ikinci bağımsız denetim, analyze/debug/run/boot ve Docker modları, daha geniş
 > firmware seti. Komut satırı izi (9.2.1b) ve asgari toplu rapor (9.2.1c) birim testli eklendi (iki gerçek analyze logunda ölçüldü; rapor gerçek sette çalıştırılmadı). Guest içi strace ile dinamik izleme ve `libhwmock` (9.2.3) **yapılmadı.**
 
 #### 9.2.1 Profil akışı (uygulandı, iki firmware ile gerçek koşuda doğrulandı)
@@ -540,3 +541,34 @@ tests/
 Kaynak sızıntısı doğrulaması her entegrasyon testinde aynı yöntemle yapılır: test öncesi ve
 sonrası `losetup -a`, `ip -o link`, `findmnt`, `/proc` altındaki alt süreçler, açık fd sayısı
 ve `scratch/IID/tmp` karşılaştırılır; fark sıfır olmalıdır.
+
+---
+
+## 12. Docker modu, daraltılmış loop yönetimi ve ayrıcalık ayrımı (grup 4, uygulandı; 2026-11-18)
+
+Ölçümler: `TEST_REPORT.md` "Grup 4". **Python ≥ 3.10** gerekir (requirements; 3.8 desteği kaldırıldı).
+
+### 12.1 Docker modu
+
+- İmaj `core/Dockerfile` ile `ubuntu:24.04` tabanından üretilir (`fcore:24.04`, 5,12 GB). İmaj tek kullanımlıktır: `PIP_BREAK_SYSTEM_PACKAGES=1`, sabit sürümlü kurulumlar (`--ignore-installed`), apt `binwalk` 2.3.4+dfsg1, sabit commit'ten (`bd864a1b…`) derlenen `sasquatch` (`-Werror` kaldırıldı, `-fcommon`, squashfs4.3 tarball'ı SHA-256 ile doğrulanır), sabit `python-lzo` 1.15 / `cstruct` 6.2 / `ubi_reader` 0.8.16 / `jefferson` 0.4.8, `fdisk`; derleme sırasında import ve duman testleri çalışır.
+- Windows/WSL: Docker Desktop'ın ilgili WSL dağıtımı için entegrasyonu açık olmalıdır (Ubuntu için açıldı; ayar dosyasının yedeği tutuldu).
+- `docker-helper.py` varsayılan olarak **daraltılmış** bayraklarla çalıştırır: `--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/loop-control --device /dev/net/tun --device-cgroup-rule 'b 7:* rmw'`. `--privileged` ve `-v /dev:/dev` yok; `FIRMAE_DOCKER_PRIVILEGED=1` eski bayrakları geri getirir. AppArmor etkin daemon daraltılmış modu, `FIRMAE_DOCKER_APPARMOR=unconfined` verilmedikçe reddeder (doğrulanmadı: AppArmor'lu yerel Ubuntu).
+- Veritabanı portu `FIRMAE_DB_PORT` ile verilir (varsayılan libpq varsayılanı/`PGPORT`).
+- Başarısız boru hattı `docker exec pgrep` ile algılanır (eskiden 2400 sn beklenirdi). `stop_core`, `docker stop` öncesinde kayıtlı loop aygıtlarını serbest bırakır (yalnızca daraltılmış modda; ayrıcalıklı modda yok).
+
+### 12.2 Daraltılmış modda loop yönetimi
+
+`b 259:*` cihaz kuralı denetimde NVMe disklerini (259:0) konteynere açtığı için **kaldırıldı**. `--partscan` bölüm düğümleri (`/dev/loopNpM`, major 259) gerektirdiğinden daraltılmış modda kullanılmaz: imaj, `sfdisk` dökümü **katı doğrulandıktan** sonra her bölüm için `losetup --offset --sizelimit` ile bağlanır (yalnızca `b 7:*`). Bu, host'un tüm loop aygıtlarını konteynere açık bırakır (kalan risk). Ayrıcalıklı modda eski `--partscan` yolu geçerlidir.
+
+### 12.3 Çıkarım kullanıcısı akışı (opt-in: `FIRMAE_EXTRACT_USER`)
+
+1. Pipeline (root) çalışma alanını root tarafında oluşturur (`FIRMAE_EXTRACT_TMP`), genel `flock` alır ve çıkarım kullanıcısının süreçlerini uid-kill ile temizler.
+2. Çıkarıcı `setpriv --no-new-privs` ve `unshare --pid --fork --kill-child` içinde ayrıcalıksız kullanıcı olarak çalışır.
+3. Çıktı adlarını root belirler; yayın `os.link` ile yapılır (varolanın üzerine yazılmaz); tar, root sahipliğine normalleştirilir.
+4. Sonrasında tekrar uid-kill ve çalışma alanı temizliği.
+
+Varsayılan kapalıdır: ayrıcalıksız çıkarım aygıt düğümlerini, setgid bitlerini ve symlink mtime'larını kaybeder (rakamlar: SECURITY.md S9). `FIRMAE_CREATE_USERS=1` ile `install.sh` kullanıcıları oluşturur. Kalan risk: DB kimlik bilgisi taşıyan ele geçirilmiş çıkarıcı root'un henüz yayımlanmamış bir id altında yayımlamasını sağlayabilir.
+
+### 12.4 Tarayıcı kullanıcısı akışı (opt-in: `FIRMAE_BROWSER_USER`)
+
+`analyses/analyses_all.sh`, tarayıcı adımını `analyses/browser_user.sh` ile çalıştırır: `setsid --wait`, stdin `/dev/null`, kendi kilidi ve uid-kill; `FIRMAE_BROWSER_TMP` çalışma alanıdır. `analyses/initializer.py` yalnızca root iken ya da `FIRMAE_CHROME_NO_SANDBOX=1` ile `--no-sandbox` ekler. **Chrome'un kendisi doğrulanmadı** (kurulu değildi).

@@ -19,19 +19,19 @@ By running our tool on the succesfully emulation firmware images, we discovered
 
 # Installation
 
-Note that we tested FirmAE on Ubuntu 20.04. On Ubuntu 24.04 there are known issues:
+Note that we tested FirmAE on Ubuntu 20.04 (upstream) and, in this fork, on WSL2 Ubuntu 24.04. **Python 3.10 or newer is required** (`requirements.txt`; Python 3.8 is no longer supported; measured only with 3.12.3). On Ubuntu 24.04 there are known issues for the host install:
 the system Python is externally managed (PEP 668), so `install.sh` stops unless you opt in to
 pip's `--break-system-packages` (`PIP_BREAK_SYSTEM_PACKAGES=1 ./install.sh` or
 `FIRMAE_PIP_ARGS=--break-system-packages ./install.sh`; this may break distribution-managed
 Python packages; a virtual environment does not work, because the pipeline runs as root with the system Python); and `sasquatch` (built by
-binwalk's `deps.sh`) does not build with GCC 13 without changes. See `TEST_REPORT.md`.
+binwalk's `deps.sh`) does not build with GCC 13 without changes (the Docker image builds it from a pinned commit with fixes, see below). See `TEST_REPORT.md`.
 
 1. Clone `FirmAE`
 ```console
 $ git clone --recursive https://github.com/pr0v3rbs/FirmAE
 ```
 
-2. Run `download.sh` script.
+2. Run `download.sh` script. The 27 downloaded files are checked against `binaries.sha256` (SHA-256) and a mismatch deletes the file and exits 1. **Default mode is `strict`**; `FIRMAE_VERIFY_DOWNLOADS=warn` only warns for unlisted/unknown hashes. The hashes pin the current upstream release assets; they do not prove where those files came from.
 ```console
 $ ./download.sh
 ```
@@ -138,6 +138,24 @@ if (${FIRMAE_ETC}); then
 ```
 
 ## Docker
+
+The image (`fcore:24.04`, about 5 GB) is built on **Ubuntu 24.04**. On Windows, enable Docker Desktop's WSL
+integration for the distribution you run FirmAE in. By default the container is started **without
+`--privileged`**, with `--cap-add SYS_ADMIN --cap-add NET_ADMIN --device /dev/loop-control --device /dev/net/tun
+--device-cgroup-rule 'b 7:* rmw'` (this is still close to root, see `SECURITY.md` S7). Measured with `-ec` on two
+firmware images (about 7 minutes each); `-ea`, `-ed`, `-er` and parallel containers are not verified.
+
+Environment variables (fork), also described in `SECURITY.md` / `ARCHITECTURE.md` section 12:
+
+| Variable | Effect |
+|---|---|
+| `FIRMAE_DB_PORT` | PostgreSQL port for all database clients (default: libpq default / `PGPORT`) |
+| `FIRMAE_DOCKER_PRIVILEGED=1` | use the old `--privileged -v /dev:/dev` flags |
+| `FIRMAE_DOCKER_APPARMOR=unconfined` | required on AppArmor-enabled daemons for the narrowed mode |
+| `FIRMAE_EXTRACT_USER`, `FIRMAE_EXTRACT_TMP` | opt-in: run firmware extraction as an unprivileged user (default off: device nodes, setgid bits and symlink mtimes are lost; host mode only) |
+| `FIRMAE_BROWSER_USER`, `FIRMAE_BROWSER_TMP` | opt-in: run the headless-browser step as an unprivileged user (Chrome itself not verified) |
+| `FIRMAE_CREATE_USERS=1` | `install.sh` creates those users |
+| `FIRMAE_VERIFY_DOWNLOADS=warn` | `download.sh` only warns on unlisted/unknown hashes (default `strict`) |
 
 First, prepare a docker image.
 ```console
