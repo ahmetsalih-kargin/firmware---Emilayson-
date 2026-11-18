@@ -118,7 +118,8 @@ def write_file_list(iid, names):
 
 def record(iid, archend, filetype, psql_ip):
     import psycopg2
-    dbh = psycopg2.connect(database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip)
+    dbh = psycopg2.connect(database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip,
+                           port=os.environ.get("FIRMAE_DB_PORT") or None)  # unset: libpq default (PGPORT, else 5432)
     try:
         cur = dbh.cursor()
         cur.execute("UPDATE image SET arch = %s WHERE id = %s;", (archend, int(iid)))

@@ -128,7 +128,8 @@ def process(iid, infile):
     (files, links) = getFileHashes(infile)
 
     dbh = psycopg2.connect(
-        database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip
+        database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip,
+        port=os.environ.get("FIRMAE_DB_PORT") or None  # unset: libpq default (PGPORT, else 5432)
     )
     try:
         cur = dbh.cursor()

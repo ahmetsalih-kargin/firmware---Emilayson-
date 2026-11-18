@@ -18,9 +18,16 @@ def io_md5(target):
         return hasher.hexdigest()
 
 
+def db_port():
+    """FIRMAE_DB_PORT, or None when unset/empty: libpq then uses its default
+    (PGPORT, else 5432), as before."""
+    return os.environ.get("FIRMAE_DB_PORT") or None
+
+
 def _connect(psql_ip):
     return psycopg2.connect(
-        database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip
+        database="firmware", user="firmadyne", password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"), host=psql_ip,
+        port=db_port()
     )
 
 

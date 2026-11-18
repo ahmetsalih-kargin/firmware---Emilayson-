@@ -243,7 +243,8 @@ class ExtractionItem(object):
             self.database = psycopg2.connect(database="firmware",
                                              user="firmadyne",
                                              password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
-                                             host=self.extractor.database)
+                                             host=self.extractor.database,
+                                             port=os.environ.get("FIRMAE_DB_PORT") or None)
 
         # Checksum
         self.checksum = Extractor.io_md5(path)
@@ -774,7 +775,8 @@ def psql_check(psql_ip):
         conn = psycopg2.connect(database="firmware",
                                 user="firmadyne",
                                 password=os.environ.get("FIRMAE_DB_PASSWORD", "firmadyne"),
-                                host=psql_ip)
+                                host=psql_ip,
+                                port=os.environ.get("FIRMAE_DB_PORT") or None)
         conn.close()
         return True
 
