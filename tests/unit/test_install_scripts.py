@@ -210,7 +210,177 @@ def test_dockerfile_uses_a_keyring_and_no_chmod_777(repo_root):
     assert "apt-get install -y gnupg" in text
     assert text.index("apt-get install -y gnupg") < text.index("gpg --dearmor")
     assert "COPY requirements.txt /tmp/requirements.txt" in text
-    assert text.splitlines()[0] == "FROM ubuntu:20.04"
+    assert text.splitlines()[0] == "FROM ubuntu:24.04"
+
+
+def dockerfile_runs(repo_root):
+    """RUN instructions of core/Dockerfile, continuation lines joined."""
+    text = (repo_root / "core/Dockerfile").read_text().replace("\\\n", " ")
+    return [l.strip()[4:] for l in text.splitlines() if l.strip().startswith("RUN ")]
+
+
+def dockerfile_packages(repo_root):
+    pkgs = []
+    for run in dockerfile_runs(repo_root):
+        for m in re.finditer(r"apt-get install -y+ ([^&;|]+)", run):
+            pkgs += m.group(1).split()
+    return pkgs
+
+
+def test_dockerfile_pep668_strategy(repo_root):
+    """Ubuntu 24.04 Python is externally managed: the image opts in to
+    --break-system-packages once, before the first pip, and keeps Debian's pip
+    (an upgraded upstream pip would try to uninstall apt-owned packages)."""
+    text = (repo_root / "core/Dockerfile").read_text()
+    lines = code_lines(repo_root / "core/Dockerfile")
+    env = index_of(lines, "ENV PIP_BREAK_SYSTEM_PACKAGES=1")
+    assert env < index_of(lines, "pip install")
+    assert "--upgrade pip" not in text
+    # pinned installs must not remove apt-owned copies (seen in the first 24.04 build)
+    for run in dockerfile_runs(repo_root):
+        if "-r /tmp/requirements-" in run or '"$req"' in run:
+            for call in re.findall(r"pip install[^&|;]*", run):
+                assert "--ignore-installed" in call, call
+    assert "setup.py install" not in text
+    # tzdata & co. must not prompt: set before the first apt-get install
+    assert index_of(lines, "ENV DEBIAN_FRONTEND=noninteractive") < index_of(lines, "apt-get install")
+
+
+def test_dockerfile_has_no_package_missing_on_noble(repo_root):
+    pkgs = dockerfile_packages(repo_root)
+    assert "qemu-system-arm" in pkgs and "binwalk" in pkgs and "unrar" in pkgs
+    # not in the ubuntu:24.04 base image; makeImage.sh needs it
+    assert "fdisk" in pkgs
+    # not in Ubuntu 24.04 (checked with apt-cache on noble), or dropped as unused
+    for missing in ("python3-crypto", "cramfsprogs", "libqt4-opengl", "python-lzo", "openjdk-8-jdk"):
+        assert missing not in pkgs, missing
+    text = (repo_root / "core/Dockerfile").read_text()
+    # binwalk's deps.sh does not work on 24.04 and is not used
+    assert "deps.sh" not in "\n".join(code_lines(repo_root / "core/Dockerfile"))
+    assert "v2.3.4.tar.gz" not in text
+
+
+def test_dockerfile_builds_sasquatch_without_werror(repo_root):
+    run = next(r for r in dockerfile_runs(repo_root) if "sasquatch" in r and "build.sh" in r)
+    assert "sed -i 's/ -Werror//g' patches/patch0.txt" in run
+    assert 'EXTRA_CFLAGS="-fcommon -Wno-error" ./build.sh' in run
+    assert run.index("patch0.txt") < run.index("build.sh")
+    assert "command -v sasquatch" in run
+
+
+def test_dockerfile_pins_and_verifies_what_it_downloads_for_sasquatch(repo_root):
+    text = (repo_root / "core/Dockerfile").read_text()
+    commit = re.search(r"^ARG SASQUATCH_COMMIT=([0-9a-f]{40})$", text, re.M)
+    sha = re.search(r"^ARG SQUASHFS43_SHA256=([0-9a-f]{64})$", text, re.M)
+    assert commit and sha
+    run = next(r for r in dockerfile_runs(repo_root) if "sasquatch" in r and "build.sh" in r)
+    assert "--depth" not in run                      # an older commit must be reachable
+    order = ['git -c advice.detachedHead=false checkout --quiet "$SASQUATCH_COMMIT"',
+             '[ "$(git rev-parse HEAD)" = "$SASQUATCH_COMMIT" ]',
+             "-O squashfs4.3.tar.gz https://downloads.sourceforge.net/",
+             'echo "$SQUASHFS43_SHA256  squashfs4.3.tar.gz" | sha256sum -c -',
+             "./build.sh"]
+    pos = [run.index(o) for o in order]
+    assert pos == sorted(pos)
+
+
+def test_dockerfile_pins_the_extractor_python_packages(repo_root):
+    run = next(r for r in dockerfile_runs(repo_root) if "jefferson" in r)
+    pkgs = run.split("pip install", 1)[1].split()
+    assert pkgs == ["python-lzo==1.15", "cstruct==6.2", "ubi_reader==0.8.16", "jefferson==0.4.8"]
+
+
+def test_dockerfile_ends_with_a_smoke_test(repo_root):
+    runs = dockerfile_runs(repo_root)
+    smoke = runs[-1]
+    assert 'python3 -c "import binwalk, magic, psycopg2' in smoke
+    for probe in ("sasquatch -h", "unsquashfs -help", "qemu-system-arm --version",
+                  "qemu-system-mips --version", "qemu-system-mipsel --version", "command -v tunctl",
+                  " fdisk ", " sfdisk ", " mkfs.ext2 "):
+        assert probe in smoke, probe
+    # no `;` in the chain: a failing probe must fail the build
+    outside_quotes = re.sub(r'"[^"]*"', '""', smoke)
+    assert ";" not in outside_quotes.replace("|| true; }", "")
+    lines = code_lines(repo_root / "core/Dockerfile")
+    assert lines[-2:] == ["ENV USER=root", "ENV FIRMAE_DOCKER=true"]
+
+
+def split_script(run, tmp_path):
+    """The part of the RUN before the pip call, with /tmp/ moved to tmp_path."""
+    parts = re.split(r"&&\s+python3 -m pip", run)
+    assert len(parts) == 2, run      # never run the pip install itself
+    return parts[0].replace("/tmp/", str(tmp_path) + "/")
+
+
+def requirements_split(repo_root, tmp_path):
+    """Run the Dockerfile's own split of requirements.txt on the real file."""
+    run = next(r for r in dockerfile_runs(repo_root) if "requirements-core.txt" in r)
+    script = split_script(run, tmp_path)
+    shutil.copy(repo_root / "requirements.txt", tmp_path / "requirements.txt")
+    res = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    return res, tmp_path
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or shutil.which("sed") is None, reason="needs sh and sed")
+def test_dockerfile_requirements_split(repo_root, tmp_path):
+    res, d = requirements_split(repo_root, tmp_path)
+    assert res.returncode == 0, res.stderr
+    core = (d / "requirements-core.txt").read_text()
+    optional = (d / "requirements-optional.txt").read_text().split()
+    # everything FirmAE imports must be in the part that has to install
+    for name in ("psycopg2==", "python_magic==", "coloredlogs==", "selenium==", "requests==", "urllib3=="):
+        assert name in core, name
+    assert "bluepy==" not in core and "pysnmp==" not in core
+    assert optional and all("==" in r for r in optional)
+    assert "bluepy==1.3.0" in optional and "pysnmp==4.4.12" in optional
+    # nothing lost, nothing duplicated
+    allreq = [l.strip() for l in code_lines(repo_root / "requirements.txt")]
+    corereq = [l.strip() for l in core.splitlines() if l.strip() and not l.startswith("#")]
+    assert sorted(corereq + optional) == sorted(allreq)
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or shutil.which("sed") is None, reason="needs sh and sed")
+def test_dockerfile_requirements_split_fails_without_the_marker(repo_root, tmp_path):
+    run = next(r for r in dockerfile_runs(repo_root) if "requirements-core.txt" in r)
+    script = split_script(run, tmp_path)
+    (tmp_path / "requirements.txt").write_text("psycopg2==2.9.9\nbluepy==1.3.0\n")
+    res = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert res.returncode != 0
+
+
+def test_dockerfile_checks_that_the_pinned_modules_import(repo_root):
+    """psycopg2==2.9.1 installed on Python 3.12 but did not import (measured in the
+    first 24.04 build); the pinned copies are checked right after installing them,
+    and no step swaps in the apt copies any more."""
+    runs = dockerfile_runs(repo_root)
+    core = next(i for i, r in enumerate(runs) if "-r /tmp/requirements-core.txt" in r)
+    check = runs[core + 1]
+    assert check.startswith('python3 -c "import psycopg2, magic;')
+    assert "psycopg2.__file__.startswith('/usr/local/')" in check
+    assert "magic.__file__.startswith('/usr/local/')" in check
+    text = (repo_root / "core/Dockerfile").read_text()
+    assert "pins-not-working" not in text and "pip uninstall" not in text
+
+
+def test_requirements_psycopg2_pin_supports_python_312(repo_root):
+    """2.9.9 is the first psycopg2 with Python 3.12 support (PyPI: cp312 files from
+    2.9.9 on); 2.9.1 built but did not import on 3.12."""
+    pins = dict(l.strip().split("==") for l in code_lines(repo_root / "requirements.txt"))
+    major, minor, patch = (int(x) for x in pins["psycopg2"].split("."))
+    assert (major, minor) == (2, 9) and patch >= 9
+
+
+def test_dockerfile_optional_pins_are_best_effort_and_reported(repo_root):
+    run = next(r for r in dockerfile_runs(repo_root) if "requirements-optional.txt" in r
+               and "pip-optional-failed" in r)
+    assert "WARNING" in run
+    assert '|| echo "$req" >> /usr/local/share/firmae/pip-optional-failed.txt' in run
+    # shared dependencies keep the core pins (requests was upgraded without -c)
+    calls = re.findall(r"pip install[^&|;]*", run)
+    assert len(calls) == 2 and all("-c /tmp/requirements-core.txt" in c for c in calls), calls
+    # the core part is installed in its own RUN, without any `|| ...` escape
+    core = next(r for r in dockerfile_runs(repo_root) if "-r /tmp/requirements-core.txt" in r)
+    assert "||" not in core
 
 
 # ---------------------------------------------------------------- binaries.sha256 / download.sh
@@ -307,13 +477,16 @@ def test_download_all_known_hashes_pass(dl):
 
 
 @pytest.mark.linux
-def test_download_unknown_hash_warns_and_keeps_the_file_by_default(dl):
+def test_download_default_mode_is_strict_and_warn_must_be_explicit(dl):
     dl.sums({n: "UNKNOWN" for n in dl.names})
-    res = dl.run()                                        # default mode = warn
+    res = dl.run()                                        # default mode = strict
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "ERROR: unverified download: %s (no SHA-256 in binaries.sha256" % dl.names[0] in res.stderr
+    assert files_in(dl) == []
+    res = dl.run("warn")                                  # warn only when asked for
     assert res.returncode == 0, res.stdout + res.stderr
     assert "WARNING: unverified download: %s (no SHA-256 in binaries.sha256)" % dl.names[0] in res.stderr
     assert files_in(dl) == sorted(dl.names)
-    assert dl.run("warn").returncode == 0
 
 
 @pytest.mark.linux
@@ -323,9 +496,10 @@ def test_download_file_missing_from_the_list_is_treated_as_unknown(dl):
     assert res.returncode == 0 and "unverified download: %s" % dl.names[0] in res.stderr
     assert (dl.root / "binaries" / dl.names[0]).exists()
     shutil.rmtree(str(dl.root / "binaries"))
-    res = dl.run("strict")
-    assert res.returncode == 1 and "unverified download: %s" % dl.names[0] in res.stderr
-    assert not (dl.root / "binaries" / dl.names[0]).exists()
+    for mode in (None, "strict"):                         # default (strict) and explicit strict
+        res = dl.run(mode)
+        assert res.returncode == 1 and "unverified download: %s" % dl.names[0] in res.stderr
+        assert not (dl.root / "binaries" / dl.names[0]).exists()
 
 
 @pytest.mark.linux

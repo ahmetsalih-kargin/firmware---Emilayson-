@@ -6,6 +6,7 @@ import subprocess as sp
 import time
 import os
 import signal
+import json
 import scripts.util as util
 import multiprocessing as mp
 import logging, coloredlogs
@@ -15,6 +16,44 @@ coloredlogs.install(level=logging.INFO)
 #rootLogger.setLevel(logging.DEBUG)
 
 
+class DockerSetupError(Exception):
+    """The container cannot be started as configured; the message says why."""
+
+
+def daemon_has_apparmor():
+    """True when the Docker daemon confines containers with AppArmor, False when
+    it does not, None when that cannot be determined."""
+    try:
+        out = sp.check_output(["docker", "info", "--format", "{{json .SecurityOptions}}"],
+                              stderr=sp.DEVNULL, timeout=60)
+        options = json.loads(out.decode())
+    except (sp.CalledProcessError, sp.TimeoutExpired, OSError, ValueError) as e:
+        logging.debug("[*] docker info: %s", e)
+        return None
+    if not isinstance(options, list):
+        return None
+    return any(isinstance(o, str) and "name=apparmor" in o for o in options)
+
+
+def apparmor_flags(daemon_apparmor, privileged, setting):
+    """Extra `docker run` flags for AppArmor. Docker's default profile
+    (docker-default) denies mount, which the narrowed container needs; on hosts
+    with AppArmor (e.g. native Ubuntu) the user has to opt in to running the
+    container unconfined (FIRMAE_DOCKER_APPARMOR=unconfined), which weakens it
+    further. --privileged is unconfined anyway."""
+    if privileged or not daemon_apparmor:
+        return []
+    if setting == "unconfined":
+        logging.warning("[!] FIRMAE_DOCKER_APPARMOR=unconfined: the container runs "
+                        "without AppArmor confinement (SECURITY.md S7)")
+        return ["--security-opt", "apparmor=unconfined"]
+    raise DockerSetupError(
+        "the Docker daemon uses AppArmor, whose default container profile denies the "
+        "mount FirmAE needs inside the container. Set FIRMAE_DOCKER_APPARMOR=unconfined "
+        "to run the container without AppArmor (weaker), or FIRMAE_DOCKER_PRIVILEGED=1 "
+        "for the old --privileged mode (much weaker); see SECURITY.md S7.")
+
+
 class docker_helper:
     def __init__(self, firmae_root, remove_image=False):
         self.firmae_root = firmae_root
@@ -22,6 +61,7 @@ class docker_helper:
         self.last_core = None
         self.__sync_status()
         self.remove_image = remove_image
+        self.daemon_apparmor = daemon_has_apparmor()
 
     def __sync_status(self):
         containers = self.get_container_list(with_pause=True)
@@ -33,6 +73,11 @@ class docker_helper:
     # never pasted into a command string (SECURITY.md S6).
     RUN_IN_CONTAINER = 'cd /work/FirmAE && ./run.sh "$1" "$2" "/work/firmwares/$3"'
 
+    # database settings handed to the container when set on the host: the
+    # password, and the port (FIRMAE_DB_PORT; unset = PostgreSQL's 5432). The
+    # host side (get_iid below) reads the same variables through scripts/util.py.
+    PASSED_ENV = ("FIRMAE_DB_PASSWORD", "FIRMAE_DB_PORT")
+
     def get_container_list(self, with_pause=False):
         lines = sp.check_output(["docker", "ps"]).decode().split('\n')[1:-1]
         ret = []
@@ -43,11 +88,72 @@ class docker_helper:
 
         return ret[::-1]
 
+    # Before the container is stopped: let the pipeline clean up after itself
+    # (SIGTERM: it unmounts, detaches its loop devices, removes its TAPs), then
+    # detach whatever loop device it attached and still holds. Loop devices are
+    # the kernel's, not the container's: `docker stop` alone leaves an attached
+    # one behind on the Docker host (measured).
+    STOP_GRACE_SECONDS = 20
+    RELEASE_LOOPS = 'cd /work/FirmAE && source ./firmae.config && release_container_loops'
+
     def stop_core(self, container_name):
+        def in_container(argv, timeout):
+            try:
+                return sp.run(["docker", "exec", container_name] + argv,
+                              stdout=sp.DEVNULL, stderr=sp.DEVNULL, timeout=timeout).returncode
+            except (OSError, sp.SubprocessError) as e:
+                logging.debug("[*] %s: %s: %s", container_name, argv[0], e)
+                return None
+        if in_container(["pkill", "-TERM", "-f", "python3 -m firmae"], 30) == 0:
+            for _ in range(self.STOP_GRACE_SECONDS):
+                if not self.pipeline_running(container_name):
+                    break
+                time.sleep(1)
+        in_container(["bash", "-c", self.RELEASE_LOOPS], 60)
         return sp.check_output(["docker", "stop", container_name])
 
     def run_core(self, idx, mode, brand, firmware_path, docker_name):
         return self._run_core(idx, mode, brand, firmware_path, docker_name)[0]
+
+    # Container privileges (SECURITY.md S7). FirmAE needs, inside the container:
+    # loop devices (makeImage.sh & co. attach the image's partition with an
+    # offset and mount it, e2fsck), TAP/VLAN interfaces and iptables rules
+    # (emulate.sh) and the TUN device QEMU opens. Each entry below was found
+    # necessary by experiment (without it: mount; tunctl/iptables/QEMU TAP;
+    # losetup --find; /dev/net/tun; opening /dev/loopN fail). Everything else
+    # stays at Docker's defaults, which already include MKNOD (the loop nodes
+    # and fixImage.sh's mknod), SYS_CHROOT (makeImage.sh) and NET_RAW (ping).
+    # The /dev/loopN nodes are made on demand by add_partition (firmae.config),
+    # as the container has no udev. No kernel partitions (`--partscan`, block
+    # major 259) are used: 259 is also the major of NVMe disks, and with it the
+    # container could mknod and open the host's disk.
+    # Residual risk: `b 7:* rmw` lets the container open EVERY loop device of the
+    # Docker host (other containers' images, snaps, ...), not only its own.
+    NARROW_FLAGS = (
+        "--cap-add", "SYS_ADMIN",                # mount/umount of the image (losetup works without)
+        "--cap-add", "NET_ADMIN",                # tunctl, ip link (VLAN), iptables
+        "--device", "/dev/loop-control",         # losetup --find
+        "--device", "/dev/net/tun",              # tunctl, QEMU's TAP
+        "--device-cgroup-rule", "b 7:* rmw",     # /dev/loopN (also any other loop device!)
+    )
+
+    def run_argv(self, env_args, firmware_root, docker_name):
+        """The `docker run` command line. FIRMAE_DOCKER_PRIVILEGED=1 restores
+        the old, much weaker `--privileged -v /dev:/dev` (the container can then
+        do anything the host's root can, including on every host device)."""
+        mounts = ["-v", "{}:/work/FirmAE".format(self.firmae_root),
+                  "-v", "{}:/work/firmwares".format(firmware_root)]
+        privileged = os.environ.get("FIRMAE_DOCKER_PRIVILEGED") == "1"
+        if privileged:
+            logging.warning("[!] FIRMAE_DOCKER_PRIVILEGED=1: running %s with --privileged "
+                            "and the host's /dev (SECURITY.md S7)", docker_name)
+            flags = ["-v", "/dev:/dev"] + mounts + ["--privileged=true"]
+        else:
+            flags = (mounts + list(self.NARROW_FLAGS)
+                     + apparmor_flags(self.daemon_apparmor, privileged,
+                                      os.environ.get("FIRMAE_DOCKER_APPARMOR")))
+        return (["docker", "run", "-dit", "--rm"] + env_args + flags
+                + ["--name", docker_name, "fcore"])
 
     # How long to wait for the extractor to register the image in the database
     IID_WAIT_SECONDS = 300
@@ -58,14 +164,12 @@ class docker_helper:
         not emulate is a normal result and still ok."""
         firmware_root = os.path.dirname(firmware_path)
         firmware = os.path.basename(firmware_path)
-        env_args = ["-e", "FIRMAE_DB_PASSWORD"] if "FIRMAE_DB_PASSWORD" in os.environ else []
-        sp.check_output(["docker", "run", "-dit", "--rm"] + env_args + [
-                         "-v", "/dev:/dev",
-                         "-v", "{}:/work/FirmAE".format(self.firmae_root),
-                         "-v", "{}:/work/firmwares".format(firmware_root),
-                         "--privileged=true",
-                         "--name", docker_name,
-                         "fcore"])
+        # passed by name only (`-e NAME`): the value never shows up in `ps`
+        env_args = []
+        for name in self.PASSED_ENV:
+            if name in os.environ:
+                env_args += ["-e", name]
+        sp.check_output(self.run_argv(env_args, firmware_root, docker_name))
         logging.info("[*] {} emulation start!".format(docker_name))
         time.sleep(5)
 
@@ -197,19 +301,43 @@ class docker_helper:
             result_path = "{}/scratch/{}/analysis_log/result".format(self.firmae_root, iid)
             timeout = 3600
 
-        for i in range(timeout):
-            time.sleep(1)
-
+        def read_result():
             try:
                 if since is not None and os.path.getmtime(result_path) < since:
-                    continue
+                    return None
                 with open(result_path) as f:
-                    result = f.read().strip()
+                    return f.read().strip()
             except OSError:
-                continue
-            return result == "true"
+                return None
+
+        for i in range(timeout):
+            time.sleep(1)
+            result = read_result()
+            if result is not None:
+                return result == "true"
+            # a pipeline that failed (e.g. makeImage.sh) writes no result file:
+            # do not wait out the whole timeout for it
+            if i % self.PIPELINE_CHECK_SECONDS == self.PIPELINE_CHECK_SECONDS - 1 \
+                    and not self.pipeline_running(docker_name):
+                result = read_result()      # it may have finished just now
+                if result is not None:
+                    return result == "true"
+                logging.error("[-] %s: the pipeline ended without writing %s", docker_name, result_path)
+                return False
 
         return False
+
+    PIPELINE_CHECK_SECONDS = 15
+
+    def pipeline_running(self, docker_name):
+        """True while run.sh (`python3 -m firmae`) still runs in the container.
+        When that cannot be determined (docker error), assume it still runs."""
+        try:
+            res = sp.run(["docker", "exec", docker_name, "pgrep", "-f", "python3 -m firmae"],
+                         stdout=sp.DEVNULL, stderr=sp.DEVNULL, timeout=60)
+        except (OSError, sp.SubprocessError):
+            return True
+        return res.returncode != 1      # pgrep: 1 = no such process
 
     def get_docker_tap_ip(self, docker_name):
         result = 'None'
@@ -239,6 +367,9 @@ def runner(args):
     ok = False
     try:
         ok = dh._run_core(idx, mode, brand, firmware_path, docker_name)[1]
+    except DockerSetupError as e:
+        logging.error("[-] %s: not started: %s", docker_name, e)
+        return False
     except Exception:
         import traceback
         traceback.print_exc()

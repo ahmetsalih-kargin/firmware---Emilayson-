@@ -385,3 +385,335 @@ def test_release_emulation_frees_everything_of_one_image(repo_root, tmp_path, fa
         "ip link delete tap1_0",
         "rm -f %s/scratch/1/run/*.sock /tmp/qemu.1 /tmp/qemu.1.S1" % root,
     ]
+
+
+# ------------------------------------------- Docker mode without /dev:/dev (SECURITY.md S7)
+# In the narrowed container add_partition attaches the image's partition with an
+# offset (no --partscan, no block major 259) and makes the loop device's nodes
+# itself (no udev). Everything here runs against a fake /sys and stubbed
+# losetup, sfdisk, mknod and rm: no device node is created or removed, nothing
+# is attached.
+
+def mountinfo(tmp_path, *fstypes):
+    p = tmp_path / "mountinfo"
+    lines = ["22 1 0:21 / /proc rw - proc proc rw"]
+    for n, fs in enumerate(fstypes):
+        lines.append("%d 1 0:%d / /dev rw,nosuid - %s %s rw" % (30 + n, 40 + n, fs, fs))
+    p.write_text("\n".join(lines) + "\n")
+    return p
+
+
+GOOD_DUMP = """label: dos
+label-id: 0x5f3d2a1b
+device: {img}
+unit: sectors
+sector-size: 512
+
+{img}1 : start=        2048, size=     2095104, type=83
+"""
+
+
+def node_env(tmp_path, fstype="tmpfs", docker=True, dump=None, img_size=1 << 30):
+    sysb = tmp_path / "sys" / "block"
+    (sysb / "loop9999").mkdir(parents=True, exist_ok=True)
+    (sysb / "loop9999" / "dev").write_text("7:9999\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    log = tmp_path / "log"
+    for name in ("mknod", "rm"):
+        stub(bindir, name, 'echo "%s $*" >> %s' % (name, log))
+    img = tmp_path / "image.raw"
+    with open(img, "wb") as f:
+        f.truncate(img_size)                       # sparse
+    (tmp_path / "dump").write_text(GOOD_DUMP.format(img=img) if dump is None else dump)
+    stub(bindir, "sfdisk", '[ "$1" = --dump ] && [ "$2" = "%s" ] && cat "%s"' % (img, tmp_path / "dump"))
+    pre = 'SYS_BLOCK="%s"; MOUNTINFO="%s"; LOOP_REGISTRY="%s"; ' % (sysb, mountinfo(tmp_path, fstype),
+                                                                  tmp_path / "registry")
+    env = {"FIRMAE_DOCKER": "true"} if docker else {}
+    return pre, env, bindir, log, img
+
+
+def logged(log):
+    return log.read_text().splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize("fstypes, docker, expected", [
+    (("tmpfs",), True, "yes"),                 # the container's own /dev
+    (("devtmpfs",), True, "no"),               # FIRMAE_DOCKER_PRIVILEGED: the host's /dev
+    (("tmpfs", "devtmpfs"), True, "no"),       # the last mount on /dev counts
+    (("devtmpfs", "tmpfs"), True, "yes"),
+    ((), True, "no"),                          # nothing mounted on /dev: unknown, do nothing
+    (("tmpfs",), False, "no"),                 # host mode: never
+])
+def test_manage_dev_nodes(repo_root, tmp_path, fstypes, docker, expected):
+    mi = mountinfo(tmp_path, *fstypes)
+    res = cfg(repo_root, 'MOUNTINFO="%s"; _manage_dev_nodes && echo yes || echo no' % mi,
+              env={"FIRMAE_DOCKER": "true"} if docker else None)
+    assert res.stdout.strip() == expected
+
+
+def test_manage_dev_nodes_with_a_missing_mountinfo_is_no(repo_root, tmp_path):
+    res = cfg(repo_root, 'MOUNTINFO="%s"; _manage_dev_nodes && echo yes || echo no' % (tmp_path / "none"),
+              env={"FIRMAE_DOCKER": "true"})
+    assert res.stdout.strip() == "no"
+
+
+# ---- _dev_node: loop devices (major 7) only
+
+def test_dev_node_makes_a_missing_loop_node_from_sysfs(repo_root, tmp_path):
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    node = tmp_path / "loop9999"
+    res = cfg(repo_root, pre + '_dev_node "%s" "$SYS_BLOCK/loop9999/dev"; echo rc=$?' % node,
+              env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=0"
+    assert logged(log) == ["rm -f %s" % node, "mknod -m 0660 %s b 7 9999" % node]
+
+
+@pytest.mark.parametrize("content", [
+    "259:0",            # the NVMe disk on many hosts (audit finding): never
+    "8:0", "253:0", "1:3", "70:1",
+    "", "7", "7:", "a:b", "7:1 x", "7:1;touch /tmp/x", "7:12345678", "07x:1",
+])
+def test_dev_node_refuses_everything_but_a_loop_device(repo_root, tmp_path, content):
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    bad = tmp_path / "bad_dev"
+    bad.write_text(content)
+    res = cfg(repo_root, pre + '_dev_node "%s/n" "%s"; echo rc=$?' % (tmp_path, bad), env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=1" and logged(log) == []
+
+
+def test_dev_node_missing_sysfs_file_is_an_error(repo_root, tmp_path):
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    res = cfg(repo_root, pre + '_dev_node "%s/n" "%s/none"; echo rc=$?' % (tmp_path, tmp_path),
+              env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=1" and logged(log) == []
+
+
+def test_dev_node_replaces_a_node_that_is_not_the_right_block_device(repo_root, tmp_path):
+    """/dev/null exists but is a character device: it is "stale" for a block
+    node and is replaced (rm and mknod are stubs: nothing is touched)."""
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    res = cfg(repo_root, pre + '_dev_node /dev/null "$SYS_BLOCK/loop9999/dev"; echo rc=$?',
+              env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=0"
+    assert logged(log) == ["rm -f /dev/null", "mknod -m 0660 /dev/null b 7 9999"]
+
+
+def test_dev_node_keeps_a_matching_loop_node(repo_root, tmp_path):
+    import stat as st_
+    blk = next(("/dev/loop%d" % i for i in range(8) if os.path.exists("/dev/loop%d" % i)
+                and st_.S_ISBLK(os.stat("/dev/loop%d" % i).st_mode)), None)
+    if blk is None:
+        pytest.skip("no /dev/loopN to compare with")
+    st = os.stat(blk)
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    (tmp_path / "match").write_text("%d:%d\n" % (os.major(st.st_rdev), os.minor(st.st_rdev)))
+    res = cfg(repo_root, pre + '_dev_node %s "%s"; echo rc=$?' % (blk, tmp_path / "match"),
+              env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=0" and logged(log) == []
+
+
+# ---- _image_partition: the untrusted partition table
+
+def image_partition(repo_root, tmp_path, dump=None, img_size=1 << 30, sfdisk_fails=False):
+    pre, env, bindir, log, img = node_env(tmp_path, dump=dump, img_size=img_size)
+    if sfdisk_fails:
+        stub(bindir, "sfdisk", "exit 1")
+    res = cfg(repo_root, pre + '_image_partition "%s"; echo rc=$?' % img, env=env, extra_path=bindir)
+    return res.stdout.split()
+
+
+def test_image_partition_of_the_makeimage_layout(repo_root, tmp_path):
+    assert image_partition(repo_root, tmp_path) == ["1048576", str(2095104 * 512), "rc=0"]
+
+
+def test_image_partition_partition_may_end_exactly_at_the_end_of_the_file(repo_root, tmp_path):
+    size = (2048 + 2095104) * 512
+    assert image_partition(repo_root, tmp_path, img_size=size)[-1] == "rc=0"
+    assert image_partition(repo_root, tmp_path, img_size=size - 1) == ["rc=1"]
+
+
+HOSTILE = {
+    "gpt": GOOD_DUMP.replace("label: dos", "label: gpt"),
+    "no label": GOOD_DUMP.replace("label: dos\n", ""),
+    "no unit": GOOD_DUMP.replace("unit: sectors\n", ""),
+    "other unit": GOOD_DUMP.replace("unit: sectors", "unit: cylinders"),
+    "4k sectors": GOOD_DUMP.replace("sector-size: 512", "sector-size: 4096"),
+    "two partitions": GOOD_DUMP + "{img}2 : start=     2097152, size=        2048, type=83\n",
+    "no partition": GOOD_DUMP.split("\n{img}1")[0] + "\n",
+    "type 7": GOOD_DUMP.replace("type=83", "type=7"),
+    "bootable": GOOD_DUMP.replace("type=83", "type=83, bootable"),
+    "start 0": GOOD_DUMP.replace("start=        2048", "start=           0"),
+    "size 0": GOOD_DUMP.replace("size=     2095104", "size=           0"),
+    "past the end": GOOD_DUMP.replace("size=     2095104", "size=     2097152"),
+    "huge": GOOD_DUMP.replace("size=     2095104", "size=9999999999999"),
+    "negative": GOOD_DUMP.replace("start=        2048", "start=       -2048"),
+    "unknown key": GOOD_DUMP.replace("unit: sectors", "unit: sectors\nfirst-lba: 34"),
+    "garbage line": GOOD_DUMP + "$(touch /tmp/firmae-pwned)\n",
+    "injected value": GOOD_DUMP.replace("type=83", "type=83; rm -rf /"),
+    "empty": "",
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE))
+def test_image_partition_refuses_anything_unexpected(repo_root, tmp_path, name):
+    img = tmp_path / "image.raw"
+    assert image_partition(repo_root, tmp_path, dump=HOSTILE[name].format(img=img)) == ["rc=1"], name
+    assert not os.path.exists("/tmp/firmae-pwned")
+
+
+def test_image_partition_sfdisk_failure_is_an_error(repo_root, tmp_path):
+    assert image_partition(repo_root, tmp_path, sfdisk_fails=True) == ["rc=1"]
+
+
+@pytest.mark.skipif(not (shutil.which("sfdisk") or os.path.exists("/sbin/sfdisk")) or
+                    not os.path.exists("/sbin/fdisk"), reason="needs fdisk and sfdisk")
+def test_image_partition_of_a_real_image_made_like_makeimage(repo_root, tmp_path):
+    """The table image.py's fdisk script writes (FDISK_INPUT), read by the real sfdisk."""
+    img = tmp_path / "real.raw"
+    with open(img, "wb") as f:
+        f.truncate(64 << 20)
+    subprocess.run(["/sbin/fdisk", str(img)], input=b"o\nn\np\n1\n\n\nw\n",
+                   capture_output=True, timeout=60)
+    e = dict(os.environ)
+    e.pop("FIRMAE_DOCKER", None)
+    e["PATH"] = "/usr/sbin:/sbin:" + e["PATH"]
+    res = subprocess.run(["bash", "-c", 'source ./firmae.config && _image_partition "$1"', "_", str(img)],
+                         cwd=repo_root, env=e, capture_output=True, text=True, timeout=60)
+    assert res.stdout.split() == ["1048576", str(((64 << 20) // 512 - 2048) * 512)], res.stderr
+
+
+# ---- attaching
+
+LOSETUP_STUB = '''echo "losetup $*" >> %(log)s
+if [ "$1" = --find ] && [ $# = 1 ]; then echo "%(find)s"; exit 0; fi
+if [ "$1" = --offset ]; then n=$(( $(cat %(c)s) + 1 )); echo $n > %(c)s
+  [ $n -le %(fails)d ] && { echo busy >&2; exit 1; }; echo "$6"; exit 0; fi
+exit 0'''
+
+
+def attach_stubs(bindir, log, show_fails=0, find_out="/dev/loop9999"):
+    count = bindir / "count"
+    count.write_text("0")
+    stub(bindir, "losetup", LOSETUP_STUB % {"log": log, "find": find_out, "c": count, "fails": show_fails})
+    stub(bindir, "sleep", "exit 0")
+    stub(bindir, "udevadm", "exit 0")
+
+
+ATTACH = "losetup --offset 1048576 --sizelimit %d --show /dev/loop9999 %%s" % (2095104 * 512)
+
+
+def test_docker_add_partition_attaches_the_partition_with_an_offset(repo_root, tmp_path):
+    pre, env, bindir, log, img = node_env(tmp_path)
+    attach_stubs(bindir, log)
+    res = cfg(repo_root, pre + 'partition_ready () { [ -n "$1" ]; }; add_partition "%s"' % img,
+              env=env, extra_path=bindir)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == "/dev/loop9999p1"
+    assert logged(log) == [
+        "losetup --find",
+        "rm -f /dev/loop9999", "mknod -m 0660 /dev/loop9999 b 7 9999",
+        ATTACH % img,
+        # the "p1" name the callers strip: the SAME loop device, not a partition
+        "rm -f /dev/loop9999p1", "mknod -m 0660 /dev/loop9999p1 b 7 9999",
+    ]
+    assert "partscan" not in log.read_text() and "259" not in log.read_text()
+    # recorded for release_container_loops: device, inode and path of the image
+    assert (tmp_path / "registry").read_text() == "/dev/loop9999 %d %s\n" % (os.stat(img).st_ino, img)
+
+
+def test_docker_add_partition_with_a_bad_table_attaches_nothing(repo_root, tmp_path):
+    pre, env, bindir, log, img = node_env(tmp_path, dump=HOSTILE["two partitions"].format(img="x"))
+    attach_stubs(bindir, log)
+    res = cfg(repo_root, pre + 'add_partition "%s"; echo rc=$?' % img, env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=1"
+    assert "unexpected partition table" in res.stderr
+    assert logged(log) == []
+
+
+def test_docker_attach_retries_when_another_container_took_the_device(repo_root, tmp_path):
+    pre, env, bindir, log, img = node_env(tmp_path)
+    attach_stubs(bindir, log, show_fails=2)
+    res = cfg(repo_root, pre + '_attach_partition_loop "%s"; echo rc=$?' % img, env=env, extra_path=bindir)
+    assert res.stdout.split() == ["/dev/loop9999", "rc=0"]
+    assert [l for l in logged(log) if l.startswith("losetup --offset")] == [ATTACH % img] * 3
+    attach_stubs(bindir, log, show_fails=99)
+    res = cfg(repo_root, pre + '_attach_partition_loop "%s"; echo rc=$?' % img, env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=1"                    # gives up after 5 tries
+
+
+@pytest.mark.parametrize("find_out", ["garbage", "/dev/loop9999 /dev/sda", "/dev/sda", "/dev/loop",
+                                      "/dev/loop12345678", "/dev/loop1p1"])
+def test_docker_attach_refuses_an_unexpected_device_name(repo_root, tmp_path, find_out):
+    pre, env, bindir, log, img = node_env(tmp_path)
+    attach_stubs(bindir, log, find_out=find_out)
+    res = cfg(repo_root, pre + '_attach_partition_loop "%s"; echo rc=$?' % img, env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=1"
+    assert not [l for l in logged(log) if l.startswith(("mknod", "rm", "losetup --offset"))]
+
+
+@pytest.mark.parametrize("fstype, docker", [("tmpfs", False), ("devtmpfs", True)])
+def test_add_partition_without_node_management_is_unchanged(repo_root, tmp_path, fstype, docker):
+    """Host mode, and Docker mode with the host's /dev: the old single
+    `losetup --find --show --partscan` call, and never a mknod, rm or sfdisk."""
+    pre, env, bindir, log, _ = node_env(tmp_path, fstype=fstype, docker=docker)
+    stub(bindir, "losetup", 'echo "losetup $*" >> %s; echo /dev/loop9999' % log)
+    stub(bindir, "sfdisk", 'echo "sfdisk $*" >> %s' % log)
+    stub(bindir, "udevadm", "exit 0")
+    res = cfg(repo_root, pre + 'partition_ready () { true; }; add_partition /x/image.raw',
+              env=env, extra_path=bindir)
+    assert res.stdout.strip() == "/dev/loop9999p1"
+    assert logged(log) == ["losetup --find --show --partscan /x/image.raw"]
+
+
+@pytest.mark.parametrize("fstype, docker, removes", [("tmpfs", True, True), ("devtmpfs", True, False),
+                                                     ("tmpfs", False, False)])
+def test_del_partition_removes_the_p1_name_only_when_it_made_it(repo_root, tmp_path, fstype, docker,
+                                                                 removes):
+    pre, env, bindir, log, _ = node_env(tmp_path, fstype=fstype, docker=docker)
+    for name in ("losetup", "dmsetup", "sleep"):
+        stub(bindir, name, "exit 0")
+    res = cfg(repo_root, pre + 'del_partition /dev/loop9999; echo rc=$?', env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=0"
+    assert logged(log) == (["rm -f /dev/loop9999p1"] if removes else [])
+
+
+# ---- release_container_loops: what docker-helper runs before `docker stop`
+
+def release(repo_root, tmp_path, registry, backing):
+    """backing: {device: "<inode> <file>"} as `losetup -l -O BACK-INO,BACK-FILE` shows it."""
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    cases = "".join('  %s) echo "%s";;\n' % (d, b) for d, b in backing.items())
+    stub(bindir, "losetup", 'echo "losetup $*" >> %s\nif [ "$1" = -l ]; then case "${@: -1}" in\n%s'
+                            'esac; fi\nexit 0' % (log, cases))
+    (tmp_path / "registry").write_text(registry)
+    res = cfg(repo_root, pre + "release_container_loops; echo rc=$?", env=env, extra_path=bindir)
+    return res, [l for l in logged(log) if not l.startswith("losetup -l")]
+
+
+def test_release_detaches_only_devices_still_backed_by_the_recorded_file(repo_root, tmp_path):
+    reg = ("/dev/loop3 111 /work/FirmAE/scratch/1/image.raw\n"
+           "/dev/loop4 222 /work/FirmAE/scratch/1/image.raw\n"     # now another file (inode)
+           "/dev/loop5 333 /work/FirmAE/scratch/1/image.raw\n"     # already detached
+           "/dev/loop6 444 /work/FirmAE/scratch/2/image.raw\n")    # now another path
+    res, calls = release(repo_root, tmp_path, reg, {
+        "/dev/loop3": "111 /work/FirmAE/scratch/1/image.raw",
+        "/dev/loop4": "999 /work/FirmAE/scratch/1/image.raw",
+        "/dev/loop6": "444 /work/FirmAE/scratch/3/image.raw"})
+    assert res.stdout.strip() == "rc=0"
+    assert calls == ["losetup -d /dev/loop3", "rm -f /dev/loop3p1", "rm -f %s" % (tmp_path / "registry")]
+
+
+@pytest.mark.parametrize("line", ["/dev/sda 111 /x", "/dev/loop3 abc /x", "garbage", "/dev/loop3p1 111 /x",
+                                  "/dev/loop12345678 111 /x"])
+def test_release_ignores_malformed_registry_lines(repo_root, tmp_path, line):
+    res, calls = release(repo_root, tmp_path, line + "\n", {"/dev/sda": "111 /x", "/dev/loop3": "111 /x"})
+    assert res.stdout.strip() == "rc=0"
+    assert not [c for c in calls if c.startswith("losetup -d")]
+
+
+def test_release_without_a_registry_does_nothing(repo_root, tmp_path):
+    pre, env, bindir, log, _ = node_env(tmp_path)
+    stub(bindir, "losetup", 'echo "losetup $*" >> %s' % log)
+    res = cfg(repo_root, pre + "release_container_loops; echo rc=$?", env=env, extra_path=bindir)
+    assert res.stdout.strip() == "rc=0" and logged(log) == []

@@ -28,6 +28,16 @@ def dh(repo_root, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.sp, "check_output", fake)
     monkeypatch.setattr(mod.sp, "call", fake)
+
+    real_run = subprocess.run      # mod.sp IS subprocess: other callers keep the real one
+
+    def fake_run(argv, *args, **kwargs):      # docker exec ... pgrep: still running
+        if isinstance(argv, list) and argv[:1] == ["docker"]:
+            assert not kwargs.get("shell")
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0)
+        return real_run(argv, *args, **kwargs)
+    monkeypatch.setattr(mod.sp, "run", fake_run)
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
     monkeypatch.setattr(mod.util, "get_iid", lambda path, ip: "")
     (tmp_path / "scratch").mkdir()
@@ -197,3 +207,250 @@ def test_batch_exits_nonzero_when_a_firmware_fails(dh, monkeypatch, tmp_path):
     assert e.value.code == 1                       # the missing firmware failed
     lst.write_text("b,%s\n" % fw)
     mod["main"]()                                  # all good: returns normally
+
+
+# ---------------------------------------------------------- database port (FIRMAE_DB_PORT)
+
+@pytest.mark.parametrize("env, expected", [
+    ({}, []),
+    ({"FIRMAE_DB_PORT": "5434"}, ["-e", "FIRMAE_DB_PORT"]),
+    ({"FIRMAE_DB_PASSWORD": "pw", "FIRMAE_DB_PORT": "5434"},
+     ["-e", "FIRMAE_DB_PASSWORD", "-e", "FIRMAE_DB_PORT"]),
+])
+def test_database_settings_are_passed_by_name(dh, monkeypatch, env, expected):
+    helper, calls, _ = dh
+    for name in ("FIRMAE_DB_PASSWORD", "FIRMAE_DB_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    helper.run_core(0, "-d", "auto", "/fw/x.bin", "docker0_x")
+    run = calls[0]
+    image = run.index("fcore")
+    passed = [a for i, a in enumerate(run[:image]) if a == "-e" or (i and run[i - 1] == "-e")]
+    assert passed == expected
+    # only the names: the values never appear on the docker command line
+    assert all(v not in run for v in env.values())
+
+
+# ---------------------------------------------------------- pipeline that ends without a result
+
+def test_check_result_stops_when_the_pipeline_ended_without_a_result(dh, monkeypatch):
+    """Measured in Docker mode: makeImage.sh failed, no result file was written and
+    docker-helper waited the full 2400 s. Now it stops once run.sh is gone."""
+    helper, calls, root = dh
+    mod = _mod(helper)
+    seen = []
+
+    def gone(argv, *a, **kw):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 1)
+    monkeypatch.setattr(mod["sp"], "run", gone)
+    assert helper.check_result("fw", "docker0_x", "b", 9, True, since=time.time()) is False
+    assert seen and seen[0] == ["docker", "exec", "docker0_x", "pgrep", "-f", "python3 -m firmae"]
+    assert len(seen) == 1                       # stopped at the first check
+
+
+def test_check_result_reads_a_result_written_just_before_the_pipeline_ended(dh, monkeypatch):
+    helper, calls, root = dh
+    mod = _mod(helper)
+    d = root / "scratch" / "9"
+    d.mkdir()
+
+    def gone(argv, *a, **kw):
+        (d / "result").write_text("true")       # finished between the two looks
+        return subprocess.CompletedProcess(argv, 1)
+    monkeypatch.setattr(mod["sp"], "run", gone)
+    assert helper.check_result("fw", "docker0_x", "b", 9, True, since=time.time() - 5) is True
+
+
+@pytest.mark.parametrize("outcome", [0, 2, "oserror", "timeout"])
+def test_pipeline_running_is_assumed_when_unknown(dh, monkeypatch, outcome):
+    helper, calls, root = dh
+    mod = _mod(helper)
+
+    def run(argv, *a, **kw):
+        if outcome == "oserror":
+            raise OSError("no docker")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(argv, 60)
+        return subprocess.CompletedProcess(argv, outcome)
+    monkeypatch.setattr(mod["sp"], "run", run)
+    assert helper.pipeline_running("docker0_x") is True
+
+
+def test_check_result_keeps_waiting_while_the_pipeline_runs(dh, monkeypatch):
+    helper, calls, root = dh
+    helper_mod = _mod(helper)
+    n = []
+    monkeypatch.setattr(helper, "pipeline_running", lambda name: (n.append(1), True)[1])
+    assert helper.check_result("fw", "docker0_x", "b", 9, True, since=time.time()) is False
+    assert len(n) == 2400 // helper.PIPELINE_CHECK_SECONDS
+
+
+# ---------------------------------------------------------- container privileges (SECURITY.md S7)
+
+def run_argv_of(dh, monkeypatch, privileged):
+    helper, calls, _ = dh
+    for name in ("FIRMAE_DB_PASSWORD", "FIRMAE_DB_PORT", "FIRMAE_DOCKER_PRIVILEGED"):
+        monkeypatch.delenv(name, raising=False)
+    if privileged is not None:
+        monkeypatch.setenv("FIRMAE_DOCKER_PRIVILEGED", privileged)
+    helper.run_core(0, "-d", "auto", "/fw dir/x.bin", "docker0_x")
+    return calls[0], helper.firmae_root
+
+
+def test_default_run_argv_is_the_narrowed_set(dh, monkeypatch):
+    run, root = run_argv_of(dh, monkeypatch, None)
+    assert run == ["docker", "run", "-dit", "--rm",
+                   "-v", "%s:/work/FirmAE" % root, "-v", "/fw dir:/work/firmwares",
+                   "--cap-add", "SYS_ADMIN", "--cap-add", "NET_ADMIN",
+                   "--device", "/dev/loop-control", "--device", "/dev/net/tun",
+                   "--device-cgroup-rule", "b 7:* rmw",
+                   "--name", "docker0_x", "fcore"]
+    assert not any("privileged" in a for a in run) and "/dev:/dev" not in run
+    # block major 259 is also the NVMe disk: never allowed (audit finding)
+    assert not any("259" in a for a in run)
+
+
+@pytest.mark.parametrize("value", ["0", "", "yes", "true"])
+def test_only_exactly_1_enables_privileged(dh, monkeypatch, value):
+    run, _ = run_argv_of(dh, monkeypatch, value)
+    assert "--privileged=true" not in run and "/dev:/dev" not in run
+
+
+def test_privileged_escape_hatch_restores_the_old_flags_exactly(dh, monkeypatch):
+    run, root = run_argv_of(dh, monkeypatch, "1")
+    assert run == ["docker", "run", "-dit", "--rm",
+                   "-v", "/dev:/dev",
+                   "-v", "%s:/work/FirmAE" % root, "-v", "/fw dir:/work/firmwares",
+                   "--privileged=true",
+                   "--name", "docker0_x", "fcore"]
+
+
+@pytest.mark.parametrize("privileged", [None, "1"])
+def test_env_names_come_right_after_run_in_both_modes(dh, monkeypatch, privileged):
+    helper, calls, _ = dh
+    monkeypatch.delenv("FIRMAE_DB_PASSWORD", raising=False)
+    monkeypatch.delenv("FIRMAE_DOCKER_PRIVILEGED", raising=False)
+    if privileged:
+        monkeypatch.setenv("FIRMAE_DOCKER_PRIVILEGED", privileged)
+    monkeypatch.setenv("FIRMAE_DB_PORT", "5434")
+    helper.run_core(0, "-d", "auto", "/fw/x.bin", "docker0_x")
+    assert calls[0][4:6] == ["-e", "FIRMAE_DB_PORT"]
+
+
+# ---------------------------------------------------------- AppArmor (docker-default denies mount)
+
+@pytest.mark.parametrize("daemon, privileged, setting, expected", [
+    (False, False, None, []),
+    (None, False, None, []),                                   # unknown: try without
+    (False, False, "unconfined", []),                          # nothing to opt out of
+    (True, True, None, []),                                    # --privileged is unconfined
+    (True, False, "unconfined", ["--security-opt", "apparmor=unconfined"]),
+])
+def test_apparmor_flags(dh, daemon, privileged, setting, expected):
+    mod = _mod(dh[0])
+    assert mod["apparmor_flags"](daemon, privileged, setting) == expected
+
+
+@pytest.mark.parametrize("setting", [None, "", "1", "yes", "Unconfined", "unconfined "])
+def test_apparmor_without_an_explicit_opt_in_refuses_with_a_clear_message(dh, setting):
+    mod = _mod(dh[0])
+    with pytest.raises(mod["DockerSetupError"]) as e:
+        mod["apparmor_flags"](True, False, setting)
+    assert "FIRMAE_DOCKER_APPARMOR=unconfined" in str(e.value)
+
+
+@pytest.mark.parametrize("out, expected", [
+    (b'["name=seccomp,profile=builtin","name=cgroupns"]', False),
+    (b'["name=apparmor","name=seccomp,profile=builtin"]', True),
+    (b'null', None), (b'not json', None), (b'{"a": 1}', None),
+])
+def test_daemon_has_apparmor_parses_docker_info(dh, monkeypatch, out, expected):
+    mod = _mod(dh[0])
+    seen = []
+    monkeypatch.setattr(mod["sp"], "check_output", lambda argv, **kw: (seen.append(argv), out)[1])
+    assert mod["daemon_has_apparmor"]() is expected
+    assert seen == [["docker", "info", "--format", "{{json .SecurityOptions}}"]]
+
+
+def test_daemon_has_apparmor_when_docker_fails_is_unknown(dh, monkeypatch):
+    mod = _mod(dh[0])
+
+    def boom(argv, **kw):
+        raise OSError("no docker")
+    monkeypatch.setattr(mod["sp"], "check_output", boom)
+    assert mod["daemon_has_apparmor"]() is None
+
+
+def test_apparmor_host_gets_the_opt_in_flag_and_privileged_ignores_it(dh, monkeypatch):
+    helper, calls, root = dh
+    helper.daemon_apparmor = True
+    for name in ("FIRMAE_DB_PASSWORD", "FIRMAE_DB_PORT", "FIRMAE_DOCKER_PRIVILEGED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FIRMAE_DOCKER_APPARMOR", "unconfined")
+    helper.run_core(0, "-d", "auto", "/fw/x.bin", "docker0_x")
+    run = calls[0]
+    assert run[-5:] == ["--security-opt", "apparmor=unconfined", "--name", "docker0_x", "fcore"]
+    calls.clear()
+    monkeypatch.setenv("FIRMAE_DOCKER_PRIVILEGED", "1")
+    helper.run_core(0, "-d", "auto", "/fw/x.bin", "docker0_x")
+    assert "--security-opt" not in calls[0] and "--privileged=true" in calls[0]
+
+
+def test_apparmor_host_without_opt_in_does_not_start_a_container(dh, monkeypatch, tmp_path):
+    helper, calls, root = dh
+    mod = _mod(helper)
+    helper.daemon_apparmor = True
+    monkeypatch.delenv("FIRMAE_DOCKER_APPARMOR", raising=False)
+    monkeypatch.delenv("FIRMAE_DOCKER_PRIVILEGED", raising=False)
+    fw = tmp_path / "x.bin"
+    fw.write_text("x")
+    monkeypatch.setattr(helper, "stop_core", lambda n: b"")
+    assert mod["runner"]((0, helper, "-c", "b", str(fw))) is False
+    assert not [c for c in calls if c[:2] == ["docker", "run"]]
+
+
+# ---------------------------------------------------------- stopping (loop devices are the kernel's)
+
+def test_stop_core_terminates_the_pipeline_releases_loops_then_stops(dh, monkeypatch):
+    helper, calls, _ = dh
+    states = iter([True, True, False])
+    monkeypatch.setattr(helper, "pipeline_running", lambda name: next(states))
+    helper.stop_core("docker0_x")
+    docker = [c for c in calls if c[:1] == ["docker"]]
+    assert docker == [
+        ["docker", "exec", "docker0_x", "pkill", "-TERM", "-f", "python3 -m firmae"],
+        ["docker", "exec", "docker0_x", "bash", "-c",
+         "cd /work/FirmAE && source ./firmae.config && release_container_loops"],
+        ["docker", "stop", "docker0_x"],
+    ]
+
+
+def test_stop_core_without_a_running_pipeline_does_not_wait(dh, monkeypatch):
+    helper, calls, _ = dh
+    mod = _mod(helper)
+    real_run = subprocess.run
+
+    def run(argv, *a, **kw):
+        if argv[:1] == ["docker"]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1 if "pkill" in argv else 0)
+        return real_run(argv, *a, **kw)
+    monkeypatch.setattr(mod["sp"], "run", run)
+    waited = []
+    monkeypatch.setattr(helper, "pipeline_running", lambda name: waited.append(1) or True)
+    helper.stop_core("docker0_x")
+    assert waited == []
+    assert calls[-1] == ["docker", "stop", "docker0_x"]
+
+
+def test_stop_core_still_stops_when_docker_exec_fails(dh, monkeypatch):
+    helper, calls, _ = dh
+    mod = _mod(helper)
+
+    def run(argv, *a, **kw):
+        raise OSError("docker exec failed")
+    monkeypatch.setattr(mod["sp"], "run", run)
+    helper.stop_core("docker0_x")
+    assert calls[-1] == ["docker", "stop", "docker0_x"]
